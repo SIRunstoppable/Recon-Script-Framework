@@ -3,10 +3,14 @@
 generate_ai_report.py <domain> <model>
 
 Reads the recon output files in the current working directory (the WORKDIR
-created by recon-framework.sh), sends a condensed summary to the Claude API,
+created by recon-framework.sh), sends a condensed summary to the Gemini API,
 and writes report/attack_surface_report.html
 
-Requires: ANTHROPIC_API_KEY env var, `requests` (pip install requests --break-system-packages)
+Requires: GEMINI_API_KEY env var, `requests` (pip install requests --break-system-packages)
+
+Note on <model>: pass a currently-valid Gemini model name (e.g. "gemini-2.0-flash").
+Check https://ai.google.dev/gemini-api/docs/models for the current list — model
+names get deprecated/renamed over time and this script does not try to guess.
 """
 import os
 import sys
@@ -14,7 +18,7 @@ import json
 import html
 import requests
 
-API_URL = "https://api.anthropic.com/v1/messages"
+API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
 def read_lines(path, limit=400):
@@ -25,7 +29,18 @@ def read_lines(path, limit=400):
     return lines[:limit]
 
 
+def read_json(path, default=None):
+    if not os.path.isfile(path):
+        return default
+    try:
+        with open(path, "r", errors="ignore") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
 def build_context(domain):
+    js_findings = read_json("report/js_findings.json", {}) or {}
     ctx = {
         "domain": domain,
         "subdomains_sample": read_lines("all_subdomains.txt", 200),
@@ -40,14 +55,16 @@ def build_context(domain):
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
+        "js_secrets_found": js_findings.get("secrets", [])[:100],
+        "js_endpoints_found": js_findings.get("endpoints_sample", [])[:150],
+        "js_total_secrets": js_findings.get("total_secrets_found", 0),
+        "js_total_endpoints": js_findings.get("total_unique_endpoints", 0),
     }
     return ctx
 
 
-def call_claude(ctx, model):
-    api_key = os.environ["ANTHROPIC_API_KEY"]
-
-    prompt = f"""You are a senior application security engineer reviewing raw recon tool output
+def build_prompt(ctx):
+    return f"""You are a senior application security engineer reviewing raw recon tool output
 for the authorized bug bounty target: {ctx['domain']}
 
 RAW DATA:
@@ -60,6 +77,14 @@ RAW DATA:
 - URLs flagged for sensitive keywords: {json.dumps(ctx['flagged_urls'][:80])}
 - Subdomain takeover scan output: {json.dumps(ctx['takeover_results'])}
 - Number of JS files harvested: {ctx['js_files_count']}
+- Potential secrets found inside JS files (values are masked, format type/masked_value/file): {json.dumps(ctx['js_secrets_found'])}
+- Total potential secrets in JS: {ctx['js_total_secrets']}
+- Hidden endpoints extracted from JS files (sample): {json.dumps(ctx['js_endpoints_found'])}
+- Total unique JS-derived endpoints: {ctx['js_total_endpoints']}
+
+Note: JS secret values are masked (first/last few chars only) by a local regex scanner and may
+include false positives (e.g. placeholder keys, minified variable names that happen to match a
+pattern). Treat them as leads to manually verify, not confirmed secrets.
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -75,6 +100,9 @@ fences, no preamble, matching exactly this schema:
   "interesting_endpoints": [
     {{"url_or_host": "string", "reason": "string"}}
   ],
+  "js_secrets_triage": [
+    {{"type": "string", "masked_value": "string", "file": "string", "likely_real": true, "note": "string"}}
+  ],
   "recommendations": ["string", "string"]
 }}
 
@@ -83,29 +111,41 @@ vulnerabilities. If nuclei found nothing critical, say so plainly and keep risk_
 proportionate. Keep it concise and actionable for a bug bounty hunter deciding what to
 manually test next."""
 
-    resp = requests.post(
-        API_URL,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
+
+def call_gemini(ctx, model):
+    api_key = os.environ["GEMINI_API_KEY"]
+    url = f"{API_BASE}/{model}:generateContent?key={api_key}"
+
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": build_prompt(ctx)}]}
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "temperature": 0.2,
+            "maxOutputTokens": 8192,
         },
-        json={
-            "model": model,
-            "max_tokens": 4000,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
+    }
+
+    resp = requests.post(url, json=payload, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
     data = resp.json()
-    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-    text = text.strip()
+
+    try:
+        candidate = data["candidates"][0]
+        parts = candidate["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts).strip()
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Unexpected Gemini response shape: {json.dumps(data)[:800]}") from e
+
     if text.startswith("```"):
         text = text.strip("`")
-        text = text.split("\n", 1)[1] if "\n" in text else text
-        if text.endswith("json"):
-            text = text[:-4]
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+        if text.lower().startswith("json"):
+            text = text[4:]
+
     return json.loads(text)
 
 
@@ -144,6 +184,18 @@ def render_html(domain, report):
 
     recs_html = "".join(f"<li>{html.escape(r)}</li>" for r in report.get("recommendations", []))
 
+    js_rows = ""
+    for s in report.get("js_secrets_triage", []):
+        likely = s.get("likely_real", False)
+        badge = sev_badge("high" if likely else "low")
+        js_rows += f"""<tr>
+          <td>{html.escape(s.get('type',''))}</td>
+          <td><code>{html.escape(s.get('masked_value',''))}</code></td>
+          <td><code>{html.escape(s.get('file',''))}</code></td>
+          <td>{badge}</td>
+          <td>{html.escape(s.get('note',''))}</td>
+        </tr>"""
+
     stats = report.get("key_stats", {})
     risk = report.get("risk_level", "low")
 
@@ -173,7 +225,7 @@ def render_html(domain, report):
 </style></head>
 <body><div class="container">
   <h1>🛡 Attack Surface Report</h1>
-  <div class="subtitle">Target: <b>{html.escape(domain)}</b> — Generated by Claude</div>
+  <div class="subtitle">Target: <b>{html.escape(domain)}</b> — Generated by Gemini</div>
   <div class="risk-banner">Overall Risk: {html.escape(risk.upper())}</div>
 
   <div class="exec">{html.escape(report.get('executive_summary',''))}</div>
@@ -191,6 +243,12 @@ def render_html(domain, report):
   <div class="section-title">Interesting Endpoints</div>
   <table>{endpoints_html or "<tr><td>None flagged.</td></tr>"}</table>
 
+  <div class="section-title">JS Secrets Triage</div>
+  <table>
+    <tr><td><b>Type</b></td><td><b>Masked Value</b></td><td><b>File</b></td><td><b>Likely Real</b></td><td><b>Note</b></td></tr>
+    {js_rows or "<tr><td colspan='5'>No JS secrets triaged.</td></tr>"}
+  </table>
+
   <div class="section-title">Recommendations</div>
   <ul>{recs_html or "<li>No specific recommendations generated.</li>"}</ul>
 </div></body></html>"""
@@ -203,8 +261,8 @@ def main():
     domain, model = sys.argv[1], sys.argv[2]
 
     ctx = build_context(domain)
-    print("  → sending recon summary to Claude for analysis...")
-    report = call_claude(ctx, model)
+    print(f"  → sending recon summary to Gemini ({model}) for analysis...")
+    report = call_gemini(ctx, model)
 
     os.makedirs("report", exist_ok=True)
     out_path = "report/attack_surface_report.html"
