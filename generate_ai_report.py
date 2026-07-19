@@ -41,6 +41,7 @@ def read_json(path, default=None):
 
 def build_context(domain):
     js_findings = read_json("report/js_findings.json", {}) or {}
+    sensitive_findings = read_json("report/sensitive_files.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
     high_conf_secrets = [s for s in all_secrets if s.get("confidence") == "high"][:100]
     low_conf_count = len([s for s in all_secrets if s.get("confidence") == "low"])
@@ -52,9 +53,14 @@ def build_context(domain):
         "live_total": len(read_lines("live/httpx_live.txt", 100000)),
         "nuclei_findings": read_lines("nuclei/nuclei_result.txt", 300),
         "nuclei_critical": read_lines("nuclei/nuclei_critical.txt", 200),
+        "nuclei_exposures": read_lines("nuclei/nuclei_exposures.txt", 250),
         "params_urls": read_lines("params/urls_with_params.txt", 150),
         "flagged_urls": read_lines("report/flagged.txt", 150),
         "takeover_results": read_lines("takeover/takeover-results.txt", 100),
+        "sensitive_files_accessible": [
+            f for f in sensitive_findings.get("findings", []) if f.get("status", 999) < 300
+        ][:100],
+        "sensitive_files_protected_count": sensitive_findings.get("protected_count", 0),
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
@@ -76,18 +82,23 @@ RAW DATA:
 - Live hosts (subset): {json.dumps(ctx['live_hosts'][:100])}
 - Nuclei findings (all severities): {json.dumps(ctx['nuclei_findings'][:150])}
 - Nuclei critical/high findings: {json.dumps(ctx['nuclei_critical'])}
+- Nuclei "easy win" findings — exposure/misconfig/default-login/token/git/backup/exposed-panel tags (often rated info/low/medium severity by nuclei itself but frequently trivial to exploit — do not dismiss these just because of the low severity label): {json.dumps(ctx['nuclei_exposures'])}
 - URLs with parameters (sample): {json.dumps(ctx['params_urls'][:80])}
 - URLs flagged for sensitive keywords: {json.dumps(ctx['flagged_urls'][:80])}
 - Subdomain takeover scan output: {json.dumps(ctx['takeover_results'])}
+- Directly accessible sensitive files/paths found (e.g. .git, .env, backups, swagger, actuator — already baseline-filtered to remove soft-404 false positives): {json.dumps(ctx['sensitive_files_accessible'])}
+- Additionally, {ctx['sensitive_files_protected_count']} sensitive paths exist but returned 401/403 (protected, still worth noting as attack surface)
 - Number of JS files harvested: {ctx['js_files_count']}
 - HIGH-CONFIDENCE potential secrets found inside JS files (already filtered for entropy + placeholder patterns by a local scanner; format type/masked_value/confidence/reason/files): {json.dumps(ctx['js_secrets_found'])}
 - Additionally, {ctx['js_low_confidence_count']} low-confidence JS matches were filtered out already (placeholders / low entropy) — do not ask about these, they were pre-screened as noise.
 - Hidden endpoints extracted from JS files (sample): {json.dumps(ctx['js_endpoints_found'])}
 - Total unique JS-derived endpoints: {ctx['js_total_endpoints']}
 
-Note: even the high-confidence JS secret values are masked (first/last few chars only) and
-were only pre-screened by entropy/pattern heuristics, not manually verified — treat them as
-strong leads to manually confirm, not certainties.
+Note: JS secret values are masked (first/last few chars only) and were only pre-screened by
+entropy/pattern heuristics, not manually verified — treat them as strong leads to manually
+confirm, not certainties. Directly accessible sensitive files (.git, .env, backups, cloud
+credential files, etc.) are usually serious findings on their own and should generally be
+rated high/critical severity unless the specific file content is clearly non-sensitive.
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -160,7 +171,7 @@ SEVERITY_COLOR = {
 }
 
 
-def render_html(domain, report):
+def render_html(domain, report, ctx):
     def sev_badge(sev):
         color = SEVERITY_COLOR.get(sev.lower(), "#6b7280")
         return f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:uppercase;">{html.escape(sev)}</span>'
@@ -186,6 +197,11 @@ def render_html(domain, report):
     )
 
     recs_html = "".join(f"<li>{html.escape(r)}</li>" for r in report.get("recommendations", []))
+
+    sensitive_rows = "".join(
+        f"<tr><td><code>{html.escape(f.get('url',''))}</code></td><td>{f.get('status','')}</td><td>{f.get('length','')}</td></tr>"
+        for f in ctx.get("sensitive_files_accessible", [])
+    )
 
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
@@ -243,6 +259,12 @@ def render_html(domain, report):
   <div class="section-title">Priority Findings</div>
   {findings_html or "<p>No priority findings surfaced from raw data.</p>"}
 
+  <div class="section-title">Exposed Sensitive Files</div>
+  <table>
+    <tr><td><b>URL</b></td><td><b>Status</b></td><td><b>Size (bytes)</b></td></tr>
+    {sensitive_rows or "<tr><td colspan='3'>None found (baseline-filtered).</td></tr>"}
+  </table>
+
   <div class="section-title">Interesting Endpoints</div>
   <table>{endpoints_html or "<tr><td>None flagged.</td></tr>"}</table>
 
@@ -270,7 +292,7 @@ def main():
     os.makedirs("report", exist_ok=True)
     out_path = "report/attack_surface_report.html"
     with open(out_path, "w") as f:
-        f.write(render_html(domain, report))
+        f.write(render_html(domain, report, ctx))
     with open("report/attack_surface_report.json", "w") as f:
         json.dump(report, f, indent=2)
 

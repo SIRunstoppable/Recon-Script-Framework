@@ -27,11 +27,12 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains resolve probe urls params nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains resolve probe sensitive_files urls params nuclei takeover keywords js ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "DNS Resolution Check"
   "Probe Alive Hosts"
+  "Sensitive File Exposure Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
   "Nuclei Vulnerability Scan"
@@ -192,6 +193,15 @@ step_probe() {
   echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
 }
 
+step_sensitive_files() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping sensitive file check${reset}"
+    return 0
+  fi
+  python3 check_sensitive_files.py
+}
+
 step_urls() {
   mkdir -p urls && cd urls || return 1
   > raw_urls.txt
@@ -224,6 +234,13 @@ step_nuclei() {
   if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
     run_with_progress "nuclei-all"      "nuclei_result.txt"   -- nuclei -l ../live/httpx_live.txt -o nuclei_result.txt
     run_with_progress "nuclei-critical" "nuclei_critical.txt" -- nuclei -l ../live/httpx_live.txt -severity high,critical -o nuclei_critical.txt
+    # Severity alone misses a lot of "easy win" bugs that nuclei tags as info/low/medium
+    # (exposed panels, default creds, leaked .git/backup files, debug endpoints, tokens...).
+    # These are usually trivial to exploit even though their CVSS-style severity is low.
+    run_with_progress "nuclei-exposures" "nuclei_exposures.txt" -- \
+      nuclei -l ../live/httpx_live.txt \
+        -tags exposure,misconfig,default-login,token,git,backup,exposed-panel,config,listing \
+        -o nuclei_exposures.txt
   fi
   cd ..
 }
@@ -312,6 +329,7 @@ fi
 
 mkdir -p "$WORKDIR"/{subdomains,resolve,live,urls,params,nuclei,takeover,js,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
 touch "$CHECKPOINT_FILE"
@@ -324,16 +342,17 @@ fi
 ###############################################################################
 # RUN ALL STEPS (each one auto-skips if already checkpointed)
 ###############################################################################
-run_step subdomains step_subdomains
-run_step resolve    step_resolve
-run_step probe      step_probe
-run_step urls       step_urls
-run_step params     step_params
-run_step nuclei     step_nuclei
-run_step takeover   step_takeover
-run_step keywords   step_keywords
-run_step js         step_js
-run_step ai_report  step_ai_report
+run_step subdomains      step_subdomains
+run_step resolve         step_resolve
+run_step probe           step_probe
+run_step sensitive_files step_sensitive_files
+run_step urls            step_urls
+run_step params          step_params
+run_step nuclei          step_nuclei
+run_step takeover        step_takeover
+run_step keywords        step_keywords
+run_step js              step_js
+run_step ai_report       step_ai_report
 
 echo ""
 echo -e "${green}${bold}✔ Recon complete.${reset} Results in: $(pwd)"
