@@ -42,6 +42,7 @@ def read_json(path, default=None):
 def build_context(domain):
     js_findings = read_json("report/js_findings.json", {}) or {}
     sensitive_findings = read_json("report/sensitive_files.json", {}) or {}
+    param_flags = read_json("report/interesting_params.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
     high_conf_secrets = [s for s in all_secrets if s.get("confidence") == "high"][:100]
     low_conf_count = len([s for s in all_secrets if s.get("confidence") == "low"])
@@ -61,6 +62,9 @@ def build_context(domain):
             f for f in sensitive_findings.get("findings", []) if f.get("status", 999) < 300
         ][:100],
         "sensitive_files_protected_count": sensitive_findings.get("protected_count", 0),
+        "open_redirect_flags": [e for e in param_flags.get("open_redirect", []) if e.get("signal") == "strong"],
+        "ssrf_flags": [e for e in param_flags.get("ssrf", []) if e.get("signal") == "strong"],
+        "idor_flags": [e for e in param_flags.get("idor", []) if e.get("signal") == "strong"],
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
@@ -88,6 +92,9 @@ RAW DATA:
 - Subdomain takeover scan output: {json.dumps(ctx['takeover_results'])}
 - Directly accessible sensitive files/paths found (e.g. .git, .env, backups, swagger, actuator — already baseline-filtered to remove soft-404 false positives): {json.dumps(ctx['sensitive_files_accessible'])}
 - Additionally, {ctx['sensitive_files_protected_count']} sensitive paths exist but returned 401/403 (protected, still worth noting as attack surface)
+- Strong-signal Open Redirect candidate parameters (name+value pattern matched, NOT confirmed — passive analysis only): {json.dumps(ctx['open_redirect_flags'])}
+- Strong-signal SSRF candidate parameters (name+value pattern matched, NOT confirmed — passive analysis only): {json.dumps(ctx['ssrf_flags'])}
+- Strong-signal IDOR candidate parameters (numeric ID in a likely-object-reference param, NOT confirmed — passive analysis only): {json.dumps(ctx['idor_flags'])}
 - Number of JS files harvested: {ctx['js_files_count']}
 - HIGH-CONFIDENCE potential secrets found inside JS files (already filtered for entropy + placeholder patterns by a local scanner; format type/masked_value/confidence/reason/files): {json.dumps(ctx['js_secrets_found'])}
 - Additionally, {ctx['js_low_confidence_count']} low-confidence JS matches were filtered out already (placeholders / low entropy) — do not ask about these, they were pre-screened as noise.
@@ -98,7 +105,12 @@ Note: JS secret values are masked (first/last few chars only) and were only pre-
 entropy/pattern heuristics, not manually verified — treat them as strong leads to manually
 confirm, not certainties. Directly accessible sensitive files (.git, .env, backups, cloud
 credential files, etc.) are usually serious findings on their own and should generally be
-rated high/critical severity unless the specific file content is clearly non-sensitive.
+rated high/critical severity unless the specific file content is clearly non-sensitive. The
+Open Redirect / SSRF / IDOR candidate parameters were flagged purely by name+value pattern
+matching with zero requests sent — they are leads for manual testing, not confirmed
+vulnerabilities. Phrase them as "candidate" or "worth testing" in your output, not as
+confirmed bugs, and rate their severity moderately (medium at most) unless corroborated by
+other evidence (e.g. a nuclei finding on the same host).
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -203,6 +215,17 @@ def render_html(domain, report, ctx):
         for f in ctx.get("sensitive_files_accessible", [])
     )
 
+    def param_rows(entries):
+        rows = ""
+        for e in entries:
+            examples = "<br>".join(html.escape(u) for u in e.get("example_urls", [])[:3])
+            rows += f"<tr><td><code>{html.escape(e.get('param',''))}</code></td><td>{examples}</td></tr>"
+        return rows
+
+    redirect_rows = param_rows(ctx.get("open_redirect_flags", []))
+    ssrf_rows = param_rows(ctx.get("ssrf_flags", []))
+    idor_rows = param_rows(ctx.get("idor_flags", []))
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -267,6 +290,21 @@ def render_html(domain, report, ctx):
 
   <div class="section-title">Interesting Endpoints</div>
   <table>{endpoints_html or "<tr><td>None flagged.</td></tr>"}</table>
+
+  <div class="section-title">Candidate Params — Manual Testing Leads (unconfirmed)</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Flagged by name/value pattern only — zero requests sent. Verify manually before reporting.</p>
+  <table>
+    <tr><td><b>Open Redirect</b></td><td><b>Example URLs</b></td></tr>
+    {redirect_rows or "<tr><td colspan='2'>None flagged.</td></tr>"}
+  </table>
+  <table>
+    <tr><td><b>SSRF</b></td><td><b>Example URLs</b></td></tr>
+    {ssrf_rows or "<tr><td colspan='2'>None flagged.</td></tr>"}
+  </table>
+  <table>
+    <tr><td><b>IDOR</b></td><td><b>Example URLs</b></td></tr>
+    {idor_rows or "<tr><td colspan='2'>None flagged.</td></tr>"}
+  </table>
 
   <div class="section-title">JS Secrets Triage</div>
   <table>

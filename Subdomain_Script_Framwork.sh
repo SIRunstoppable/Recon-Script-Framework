@@ -27,7 +27,7 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains resolve probe sensitive_files urls params nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains resolve probe sensitive_files urls params param_flagging nuclei takeover keywords js ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "DNS Resolution Check"
@@ -35,6 +35,7 @@ STEP_LABELS=(
   "Sensitive File Exposure Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
+  "Open Redirect / SSRF / IDOR Flagging"
   "Nuclei Vulnerability Scan"
   "Subdomain Takeover Check"
   "Sensitive Keyword Grep"
@@ -229,6 +230,15 @@ step_params() {
   cd ..
 }
 
+step_param_flagging() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping param flagging${reset}"
+    return 0
+  fi
+  python3 flag_interesting_params.py
+}
+
 step_nuclei() {
   mkdir -p nuclei && cd nuclei || return 1
   if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
@@ -330,6 +340,7 @@ fi
 mkdir -p "$WORKDIR"/{subdomains,resolve,live,urls,params,nuclei,takeover,js,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
 touch "$CHECKPOINT_FILE"
@@ -348,6 +359,7 @@ run_step probe           step_probe
 run_step sensitive_files step_sensitive_files
 run_step urls            step_urls
 run_step params          step_params
+run_step param_flagging  step_param_flagging
 run_step nuclei          step_nuclei
 run_step takeover        step_takeover
 run_step keywords        step_keywords
