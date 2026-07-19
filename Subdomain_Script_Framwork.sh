@@ -6,17 +6,29 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------- Load secrets from .env (never hardcode keys / never commit .env) ----------
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 # ---------- Colors ----------
 red="\e[91m"; green="\e[92m"; blue="\e[94m"; yellow="\e[93m"
 cyan="\e[96m"; bold="\e[1m"; dim="\e[2m"; reset="\e[0m"
 
 # ---------- Config ----------
-# Set this env var before running: export GEMINI_API_KEY="AIza..."
-GEMINI_MODEL="gemini-2.0-flash"          # check https://ai.google.dev/gemini-api/docs/models for current names
+# GEMINI_API_KEY comes from .env (see .env.example)
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.0-flash}"   # check https://ai.google.dev/gemini-api/docs/models for current names
 THREADS=100
 
 # ---------- Step tracking ----------
-STEPS=(
+# key = stable ID stored in the checkpoint file. label = what's shown to the user.
+STEP_KEYS=(subdomains probe urls params nuclei takeover keywords js ai_report)
+STEP_LABELS=(
   "Subdomain Enumeration"
   "Probe Alive Hosts"
   "Collect URLs (Wayback/GAU)"
@@ -27,8 +39,9 @@ STEPS=(
   "JavaScript File Harvest"
   "AI Attack Surface Report"
 )
-TOTAL_STEPS=${#STEPS[@]}
+TOTAL_STEPS=${#STEP_KEYS[@]}
 CURRENT_STEP=0
+CHECKPOINT_FILE=".checkpoint"
 
 # ---------- UI helpers ----------
 
@@ -50,8 +63,35 @@ echo -e "${reset}${yellow}   Automated Recon + AI Attack-Surface Reporting${rese
 step_header() {
   CURRENT_STEP=$((CURRENT_STEP + 1))
   echo ""
-  echo -e "${blue}${bold}[${CURRENT_STEP}/${TOTAL_STEPS}] ${STEPS[$((CURRENT_STEP-1))]}${reset}"
+  echo -e "${blue}${bold}[${CURRENT_STEP}/${TOTAL_STEPS}] ${STEP_LABELS[$((CURRENT_STEP-1))]}${reset}"
   echo -e "${dim}────────────────────────────────────────────────────────────${reset}"
+}
+
+is_step_done() {
+  [[ -f "$CHECKPOINT_FILE" ]] && grep -qx "$1" "$CHECKPOINT_FILE"
+}
+
+mark_step_done() {
+  echo "$1" >> "$CHECKPOINT_FILE"
+}
+
+# Wraps a step: prints header, skips if already checkpointed, marks done on success.
+# Usage: run_step <step_key> <function_name>
+run_step() {
+  local key="$1" func="$2"
+  step_header
+  if is_step_done "$key"; then
+    echo -e "${green}✓ already completed earlier — skipping (checkpoint: $key)${reset}"
+    return 0
+  fi
+  "$func"
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    mark_step_done "$key"
+  else
+    echo -e "${red}  ⚠ step '$key' exited with an error — not marked complete, will retry next run${reset}"
+  fi
+  return $rc
 }
 
 # Runs a command in the background and shows a live spinner + elapsed timer + line count of an output file
@@ -65,7 +105,6 @@ run_with_progress() {
   local logfile="logs/${label// /_}.log"
   mkdir -p logs
 
-  # run the real command in background, log everything
   ( "$@" ) > "$logfile" 2>&1 &
   local pid=$!
 
@@ -106,6 +145,122 @@ check_tool() {
 }
 
 ###############################################################################
+# STEP FUNCTIONS
+# Each one assumes CWD = WORKDIR and returns non-zero only on a hard failure.
+###############################################################################
+
+step_subdomains() {
+  mkdir -p subdomains && cd subdomains || return 1
+  check_tool subfinder && run_with_progress "subfinder" "subfinder.txt" -- subfinder -d "$domain" -o subfinder.txt
+  check_tool amass     && run_with_progress "amass"     "amass.txt"     -- amass enum -d "$domain" -o amass.txt
+  check_tool sublist3r && run_with_progress "sublist3r" "sublist3r.txt" -- sublist3r -d "$domain" -o sublist3r.txt
+  check_tool gobuster  && run_with_progress "gobuster"  "gobuster.txt"  -- \
+    gobuster dns -d "$domain" -r /etc/resolv.conf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --wildcard -q -o gobuster.txt
+
+  cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
+  cd ..
+  echo -e "${green}[+] Total unique subdomains: $(wc -l < all_subdomains.txt)${reset}"
+}
+
+step_probe() {
+  mkdir -p live && cd live || return 1
+  if check_tool httpx; then
+    run_with_progress "httpx" "httpx_live.txt" -- \
+      httpx -l ../all_subdomains.txt -title -tech-detect -status-code -ip -o httpx_live.txt
+  fi
+  cd ..
+  echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
+}
+
+step_urls() {
+  mkdir -p urls && cd urls || return 1
+  > raw_urls.txt
+  if [[ -s ../live/httpx_live.txt ]]; then
+    while read -r sub; do
+      host=$(echo "$sub" | awk '{print $1}')
+      check_tool waybackurls && echo "$host" | waybackurls >> raw_urls.txt 2>/dev/null
+      check_tool gau         && echo "$host" | gau         >> raw_urls.txt 2>/dev/null
+    done < ../live/httpx_live.txt
+  fi
+  sort -u raw_urls.txt > all_urls.txt
+  echo -e "${green}[+] URLs collected: $(wc -l < all_urls.txt)${reset}"
+  cd ..
+}
+
+step_params() {
+  mkdir -p params && cd params || return 1
+  grep -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_with_params.txt
+  grep -v -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_no_params.txt
+  check_tool arjun && run_with_progress "arjun" "arjun_out.txt" -- \
+    arjun -i urls_no_params.txt -o arjun_out.txt
+
+  cat ../urls/all_urls.txt 2>/dev/null | awk -F/ '{print $3}' | grep -E "(\.|^)${domain}$" | sort -u > for_paramspider.txt
+  check_tool paramspider && run_with_progress "paramspider" "" -- paramspider -l for_paramspider.txt
+  cd ..
+}
+
+step_nuclei() {
+  mkdir -p nuclei && cd nuclei || return 1
+  if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
+    run_with_progress "nuclei-all"      "nuclei_result.txt"   -- nuclei -l ../live/httpx_live.txt -o nuclei_result.txt
+    run_with_progress "nuclei-critical" "nuclei_critical.txt" -- nuclei -l ../live/httpx_live.txt -severity high,critical -o nuclei_critical.txt
+  fi
+  cd ..
+}
+
+step_takeover() {
+  mkdir -p takeover && cd takeover || return 1
+  if check_tool subjack; then
+    wget -q https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json -O fingerprints.json
+    run_with_progress "subjack" "takeover-results.txt" -- \
+      subjack -w ../all_subdomains.txt -t "$THREADS" -timeout 30 -ssl -c fingerprints.json -v -o takeover-results.txt
+  fi
+  cd ..
+}
+
+step_keywords() {
+  mkdir -p report
+  grep -Ei "admin|login|debug|test|staging|internal|secret|api[_-]?key|token|auth" urls/all_urls.txt 2>/dev/null > report/flagged.txt
+  local flagged_count
+  flagged_count=$(wc -l < report/flagged.txt 2>/dev/null || echo 0)
+  if [[ "$flagged_count" -gt 0 ]]; then
+    echo -e "${yellow}[!] $flagged_count suspicious URLs flagged -> report/flagged.txt${reset}"
+  else
+    echo -e "${green}[✓] No suspicious URLs found.${reset}"
+  fi
+}
+
+step_js() {
+  mkdir -p js && cd js || return 1
+  grep -E '\.js(\?|$)' ../urls/all_urls.txt 2>/dev/null | sort -u > js_urls.txt
+  local js_total js_done=0
+  js_total=$(wc -l < js_urls.txt)
+  while read -r jsurl; do
+    [[ -z "$jsurl" ]] && continue
+    local fname
+    fname=$(echo "$jsurl" | sed 's/[^a-zA-Z0-9]/_/g').js
+    curl -sS --max-time 10 -L "$jsurl" -o "$fname" 2>/dev/null && js_done=$((js_done+1))
+    printf "\r${cyan}⠋${reset} Downloading JS files  ${green}%d/%d${reset}   " "$js_done" "$js_total"
+  done < js_urls.txt
+  echo ""
+
+  if [[ "$js_done" -gt 0 ]]; then
+    echo -e "${cyan}  Scanning JS files for hidden endpoints & secrets...${reset}"
+    python3 ../scan_js_secrets.py
+  fi
+  cd ..
+}
+
+step_ai_report() {
+  if [[ -z "$GEMINI_API_KEY" ]]; then
+    echo -e "${red}  ⚠ GEMINI_API_KEY not set - skipping AI report.${reset}"
+    echo -e "  ${dim}Put GEMINI_API_KEY=AIza... in $SCRIPT_DIR/.env then re-run this step.${reset}"
+    return 1
+  fi
+  python3 generate_ai_report.py "$domain" "$GEMINI_MODEL"
+}
+
+###############################################################################
 # START
 ###############################################################################
 banner
@@ -115,142 +270,49 @@ if [[ -z "$domain" ]]; then
   echo -e "${red}No domain given, exiting.${reset}"; exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKDIR="recon-${domain}-$(date +%Y%m%d-%H%M)"
+# ---------- Resume detection ----------
+mapfile -t existing_dirs < <(ls -d recon-"${domain}"-* 2>/dev/null | sort -r)
+
+WORKDIR=""
+if [[ ${#existing_dirs[@]} -gt 0 ]]; then
+  latest="${existing_dirs[0]}"
+  echo -e "${yellow}Found a previous run for this domain: ${bold}${latest}${reset}"
+  read -p "Resume it? [Y/n] " resume_choice
+  resume_choice="${resume_choice:-Y}"
+  if [[ "$resume_choice" =~ ^[Yy]$ ]]; then
+    WORKDIR="$latest"
+    echo -e "${green}Resuming: $WORKDIR${reset}"
+  fi
+fi
+
+if [[ -z "$WORKDIR" ]]; then
+  WORKDIR="recon-${domain}-$(date +%Y%m%d-%H%M)"
+  echo -e "${green}Starting fresh run: $WORKDIR${reset}"
+fi
+
 mkdir -p "$WORKDIR"/{subdomains,live,urls,params,nuclei,takeover,js,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
+touch "$CHECKPOINT_FILE"
 
 echo -e "${green}Output directory: ${bold}$(pwd)${reset}"
-
-###############################################################################
-# STEP 1: Subdomain enumeration
-###############################################################################
-step_header
-cd subdomains || exit 1
-
-check_tool subfinder && run_with_progress "subfinder" "subfinder.txt" -- subfinder -d "$domain" -o subfinder.txt
-check_tool amass     && run_with_progress "amass"     "amass.txt"     -- amass enum -d "$domain" -o amass.txt
-check_tool sublist3r && run_with_progress "sublist3r" "sublist3r.txt" -- sublist3r -d "$domain" -o sublist3r.txt
-check_tool gobuster  && run_with_progress "gobuster"  "gobuster.txt"  -- \
-  gobuster dns -d "$domain" -r /etc/resolv.conf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --wildcard -q -o gobuster.txt
-
-cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
-cd ..
-echo -e "${green}[+] Total unique subdomains: $(wc -l < all_subdomains.txt)${reset}"
-
-###############################################################################
-# STEP 2: Probe alive hosts
-###############################################################################
-step_header
-cd live || exit 1
-if check_tool httpx; then
-  run_with_progress "httpx" "httpx_live.txt" -- \
-    httpx -l ../all_subdomains.txt -title -tech-detect -status-code -ip -o httpx_live.txt
-fi
-cd ..
-echo -e "${green}[+] Live hosts: $(wc -l < live/httpx_live.txt 2>/dev/null || echo 0)${reset}"
-
-###############################################################################
-# STEP 3: URL collection
-###############################################################################
-step_header
-cd urls || exit 1
-> raw_urls.txt
-if [[ -s ../live/httpx_live.txt ]]; then
-  while read -r sub; do
-    host=$(echo "$sub" | awk '{print $1}')
-    check_tool waybackurls && echo "$host" | waybackurls >> raw_urls.txt 2>/dev/null
-    check_tool gau         && echo "$host" | gau         >> raw_urls.txt 2>/dev/null
-  done < ../live/httpx_live.txt
-fi
-sort -u raw_urls.txt > all_urls.txt
-echo -e "${green}[+] URLs collected: $(wc -l < all_urls.txt)${reset}"
-cd ..
-
-###############################################################################
-# STEP 4: Parameter discovery
-###############################################################################
-step_header
-cd params || exit 1
-grep -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_with_params.txt
-grep -v -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_no_params.txt
-check_tool arjun && run_with_progress "arjun" "arjun_out.txt" -- \
-  arjun -i urls_no_params.txt -o arjun_out.txt
-
-cat ../urls/all_urls.txt 2>/dev/null | awk -F/ '{print $3}' | grep -E "(\.|^)${domain}$" | sort -u > for_paramspider.txt
-check_tool paramspider && run_with_progress "paramspider" "" -- paramspider -l for_paramspider.txt
-cd ..
-
-###############################################################################
-# STEP 5: Nuclei scan
-###############################################################################
-step_header
-cd nuclei || exit 1
-if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
-  run_with_progress "nuclei-all"      "nuclei_result.txt"   -- nuclei -l ../live/httpx_live.txt -o nuclei_result.txt
-  run_with_progress "nuclei-critical" "nuclei_critical.txt" -- nuclei -l ../live/httpx_live.txt -severity high,critical -o nuclei_critical.txt
-fi
-cd ..
-
-###############################################################################
-# STEP 6: Subdomain takeover
-###############################################################################
-step_header
-cd takeover || exit 1
-if check_tool subjack; then
-  wget -q https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json -O fingerprints.json
-  run_with_progress "subjack" "takeover-results.txt" -- \
-    subjack -w ../all_subdomains.txt -t "$THREADS" -timeout 30 -ssl -c fingerprints.json -v -o takeover-results.txt
-fi
-cd ..
-
-###############################################################################
-# STEP 7: Sensitive keyword grep
-###############################################################################
-step_header
-grep -Ei "admin|login|debug|test|staging|internal|secret|api[_-]?key|token|auth" urls/all_urls.txt 2>/dev/null > report/flagged.txt
-FLAGGED_COUNT=$(wc -l < report/flagged.txt 2>/dev/null || echo 0)
-if [[ "$FLAGGED_COUNT" -gt 0 ]]; then
-  echo -e "${yellow}[!] $FLAGGED_COUNT suspicious URLs flagged -> report/flagged.txt${reset}"
-else
-  echo -e "${green}[✓] No suspicious URLs found.${reset}"
+if [[ -s "$CHECKPOINT_FILE" ]]; then
+  echo -e "${dim}Checkpoints already completed: $(paste -sd, "$CHECKPOINT_FILE")${reset}"
 fi
 
 ###############################################################################
-# STEP 8: JS harvesting
+# RUN ALL STEPS (each one auto-skips if already checkpointed)
 ###############################################################################
-step_header
-cd js || exit 1
-grep -E '\.js(\?|$)' ../urls/all_urls.txt 2>/dev/null | sort -u > js_urls.txt
-JS_TOTAL=$(wc -l < js_urls.txt)
-JS_DONE=0
-while read -r jsurl; do
-  [[ -z "$jsurl" ]] && continue
-  fname=$(echo "$jsurl" | sed 's/[^a-zA-Z0-9]/_/g').js
-  curl -sS --max-time 10 -L "$jsurl" -o "$fname" 2>/dev/null && JS_DONE=$((JS_DONE+1))
-  printf "\r${cyan}⠋${reset} Downloading JS files  ${green}%d/%d${reset}   " "$JS_DONE" "$JS_TOTAL"
-done < js_urls.txt
-echo ""
-
-if [[ "$JS_DONE" -gt 0 ]]; then
-  echo -e "${cyan}  Scanning JS files for hidden endpoints & secrets...${reset}"
-  python3 ../scan_js_secrets.py
-fi
-cd ..
-
-###############################################################################
-# STEP 9: AI Attack Surface Report
-###############################################################################
-step_header
-
-if [[ -z "$GEMINI_API_KEY" ]]; then
-  echo -e "${red}  ⚠ GEMINI_API_KEY not set - skipping AI report.${reset}"
-  echo -e "  ${dim}export GEMINI_API_KEY=\"AIza...\" then re-run this step.${reset}"
-else
-  python3 generate_ai_report.py "$domain" "$GEMINI_MODEL"
-fi
+run_step subdomains step_subdomains
+run_step probe      step_probe
+run_step urls       step_urls
+run_step params     step_params
+run_step nuclei     step_nuclei
+run_step takeover   step_takeover
+run_step keywords   step_keywords
+run_step js         step_js
+run_step ai_report  step_ai_report
 
 echo ""
 echo -e "${green}${bold}✔ Recon complete.${reset} Results in: $(pwd)"

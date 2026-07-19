@@ -1,0 +1,14 @@
+# Secrets - never commit real keys
+.env
+ 
+# Generated recon output (one folder per run, contains raw scan data)
+recon-*/
+ 
+# Python
+__pycache__/
+*.pyc
+ 
+# OS / editor junk
+.DS_Store
+.vscode/
+ 
