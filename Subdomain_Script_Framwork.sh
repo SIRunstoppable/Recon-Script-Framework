@@ -27,9 +27,10 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains probe urls params nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains resolve probe urls params nuclei takeover keywords js ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
+  "DNS Resolution Check"
   "Probe Alive Hosts"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
@@ -162,11 +163,30 @@ step_subdomains() {
   echo -e "${green}[+] Total unique subdomains: $(wc -l < all_subdomains.txt)${reset}"
 }
 
+step_resolve() {
+  mkdir -p resolve && cd resolve || return 1
+  if check_tool dnsx; then
+    run_with_progress "dnsx" "resolved_subdomains.txt" -- \
+      dnsx -l ../all_subdomains.txt -silent -o resolved_subdomains.txt
+  else
+    echo -e "${yellow}  dnsx not found — skipping resolution filter, all subdomains will be probed as-is${reset}"
+    cp ../all_subdomains.txt resolved_subdomains.txt
+  fi
+  cp resolved_subdomains.txt ../resolved_subdomains.txt
+  cd ..
+  local total resolved
+  total=$(cat all_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
+  resolved=$(cat resolved_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
+  echo -e "${green}[+] Resolvable subdomains: $resolved / $total${reset}"
+}
+
 step_probe() {
   mkdir -p live && cd live || return 1
+  local target_list="../resolved_subdomains.txt"
+  [[ -f "$target_list" ]] || target_list="../all_subdomains.txt"  # fallback for old runs without a resolve step
   if check_tool httpx; then
     run_with_progress "httpx" "httpx_live.txt" -- \
-      httpx -l ../all_subdomains.txt -title -tech-detect -status-code -ip -o httpx_live.txt
+      httpx -l "$target_list" -title -tech-detect -status-code -ip -o httpx_live.txt
   fi
   cd ..
   echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
@@ -290,7 +310,7 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,live,urls,params,nuclei,takeover,js,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,resolve,live,urls,params,nuclei,takeover,js,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
@@ -305,6 +325,7 @@ fi
 # RUN ALL STEPS (each one auto-skips if already checkpointed)
 ###############################################################################
 run_step subdomains step_subdomains
+run_step resolve    step_resolve
 run_step probe      step_probe
 run_step urls       step_urls
 run_step params     step_params
