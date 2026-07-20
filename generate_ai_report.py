@@ -43,6 +43,7 @@ def build_context(domain):
     js_findings = read_json("report/js_findings.json", {}) or {}
     sensitive_findings = read_json("report/sensitive_files.json", {}) or {}
     param_flags = read_json("report/interesting_params.json", {}) or {}
+    api_findings = read_json("report/api_endpoints.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
     high_conf_secrets = [s for s in all_secrets if s.get("confidence") == "high"][:100]
     low_conf_count = len([s for s in all_secrets if s.get("confidence") == "low"])
@@ -65,6 +66,13 @@ def build_context(domain):
         "open_redirect_flags": [e for e in param_flags.get("open_redirect", []) if e.get("signal") == "strong"],
         "ssrf_flags": [e for e in param_flags.get("ssrf", []) if e.get("signal") == "strong"],
         "idor_flags": [e for e in param_flags.get("idor", []) if e.get("signal") == "strong"],
+        "openapi_specs": [
+            {**s, "endpoints": s.get("endpoints", [])[:80]} for s in api_findings.get("openapi_specs", [])
+        ][:20],
+        "graphql_endpoints": [
+            {**g, "queries": g.get("queries", [])[:40], "mutations": g.get("mutations", [])[:40]}
+            for g in api_findings.get("graphql_endpoints", [])
+        ][:20],
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
@@ -95,6 +103,8 @@ RAW DATA:
 - Strong-signal Open Redirect candidate parameters (name+value pattern matched, NOT confirmed — passive analysis only): {json.dumps(ctx['open_redirect_flags'])}
 - Strong-signal SSRF candidate parameters (name+value pattern matched, NOT confirmed — passive analysis only): {json.dumps(ctx['ssrf_flags'])}
 - Strong-signal IDOR candidate parameters (numeric ID in a likely-object-reference param, NOT confirmed — passive analysis only): {json.dumps(ctx['idor_flags'])}
+- OpenAPI/Swagger specs discovered and parsed (real, documented API endpoints extracted directly from the target's own API docs — these ARE confirmed to exist, unlike the flags above): {json.dumps(ctx['openapi_specs'])}
+- GraphQL endpoints where introspection is ENABLED (schema was successfully read — flag introspection-enabled-in-production as its own finding, then look at query/mutation names for anything sensitive like delete/admin/impersonate/export): {json.dumps(ctx['graphql_endpoints'])}
 - Number of JS files harvested: {ctx['js_files_count']}
 - HIGH-CONFIDENCE potential secrets found inside JS files (already filtered for entropy + placeholder patterns by a local scanner; format type/masked_value/confidence/reason/files): {json.dumps(ctx['js_secrets_found'])}
 - Additionally, {ctx['js_low_confidence_count']} low-confidence JS matches were filtered out already (placeholders / low entropy) — do not ask about these, they were pre-screened as noise.
