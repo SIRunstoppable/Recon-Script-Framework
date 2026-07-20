@@ -27,16 +27,18 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains resolve probe sensitive_files api_extraction urls params param_flagging nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains resolve probe sensitive_files api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "DNS Resolution Check"
   "Probe Alive Hosts"
   "Sensitive File Exposure Check"
   "API Endpoint Extraction (Swagger/GraphQL)"
+  "CORS + Security Headers Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
   "Open Redirect / SSRF / IDOR Flagging"
+  "XSS Scan (dalfox)"
   "Nuclei Vulnerability Scan"
   "Subdomain Takeover Check"
   "Sensitive Keyword Grep"
@@ -213,6 +215,15 @@ step_api_extraction() {
   python3 extract_api_endpoints.py
 }
 
+step_cors_headers() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping CORS/header check${reset}"
+    return 0
+  fi
+  python3 check_cors_headers.py
+}
+
 step_urls() {
   mkdir -p urls && cd urls || return 1
   > raw_urls.txt
@@ -247,6 +258,21 @@ step_param_flagging() {
     return 0
   fi
   python3 flag_interesting_params.py
+}
+
+step_xss() {
+  mkdir -p nuclei  # reuse the nuclei/ folder for all "active vuln scan" output
+  if ! check_tool dalfox; then
+    return 0
+  fi
+  if [[ ! -s params/urls_with_params.txt ]]; then
+    echo -e "${yellow}  no parameterized URLs to test — skipping${reset}"
+    return 0
+  fi
+  cd nuclei || return 1
+  run_with_progress "dalfox" "dalfox_xss.txt" -- \
+    dalfox file ../params/urls_with_params.txt --silence --no-color -o dalfox_xss.txt
+  cd ..
 }
 
 step_nuclei() {
@@ -352,6 +378,7 @@ cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
 touch "$CHECKPOINT_FILE"
@@ -369,9 +396,11 @@ run_step resolve         step_resolve
 run_step probe           step_probe
 run_step sensitive_files step_sensitive_files
 run_step api_extraction  step_api_extraction
+run_step cors_headers    step_cors_headers
 run_step urls            step_urls
 run_step params          step_params
 run_step param_flagging  step_param_flagging
+run_step xss             step_xss
 run_step nuclei          step_nuclei
 run_step takeover        step_takeover
 run_step keywords        step_keywords

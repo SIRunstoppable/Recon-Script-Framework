@@ -44,6 +44,7 @@ def build_context(domain):
     sensitive_findings = read_json("report/sensitive_files.json", {}) or {}
     param_flags = read_json("report/interesting_params.json", {}) or {}
     api_findings = read_json("report/api_endpoints.json", {}) or {}
+    cors_findings = read_json("report/cors_headers.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
     high_conf_secrets = [s for s in all_secrets if s.get("confidence") == "high"][:100]
     low_conf_count = len([s for s in all_secrets if s.get("confidence") == "low"])
@@ -73,6 +74,9 @@ def build_context(domain):
             {**g, "queries": g.get("queries", [])[:40], "mutations": g.get("mutations", [])[:40]}
             for g in api_findings.get("graphql_endpoints", [])
         ][:20],
+        "cors_findings": cors_findings.get("cors_findings", [])[:60],
+        "hosts_missing_headers": cors_findings.get("hosts_missing_headers", [])[:60],
+        "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
@@ -105,6 +109,9 @@ RAW DATA:
 - Strong-signal IDOR candidate parameters (numeric ID in a likely-object-reference param, NOT confirmed — passive analysis only): {json.dumps(ctx['idor_flags'])}
 - OpenAPI/Swagger specs discovered and parsed (real, documented API endpoints extracted directly from the target's own API docs — these ARE confirmed to exist, unlike the flags above): {json.dumps(ctx['openapi_specs'])}
 - GraphQL endpoints where introspection is ENABLED (schema was successfully read — flag introspection-enabled-in-production as its own finding, then look at query/mutation names for anything sensitive like delete/admin/impersonate/export): {json.dumps(ctx['graphql_endpoints'])}
+- CORS misconfigurations found (each is a confirmed, tested response header behavior — e.g. arbitrary Origin reflected back with credentials allowed): {json.dumps(ctx['cors_findings'])}
+- Hosts missing baseline security headers (CSP/X-Frame-Options/HSTS/X-Content-Type-Options): {json.dumps(ctx['hosts_missing_headers'])}
+- Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Number of JS files harvested: {ctx['js_files_count']}
 - HIGH-CONFIDENCE potential secrets found inside JS files (already filtered for entropy + placeholder patterns by a local scanner; format type/masked_value/confidence/reason/files): {json.dumps(ctx['js_secrets_found'])}
 - Additionally, {ctx['js_low_confidence_count']} low-confidence JS matches were filtered out already (placeholders / low entropy) — do not ask about these, they were pre-screened as noise.
@@ -120,7 +127,12 @@ Open Redirect / SSRF / IDOR candidate parameters were flagged purely by name+val
 matching with zero requests sent — they are leads for manual testing, not confirmed
 vulnerabilities. Phrase them as "candidate" or "worth testing" in your output, not as
 confirmed bugs, and rate their severity moderately (medium at most) unless corroborated by
-other evidence (e.g. a nuclei finding on the same host).
+other evidence (e.g. a nuclei finding on the same host). CORS findings with
+credentials_allowed=true reflecting an arbitrary origin are serious (high/critical); missing
+security headers alone are low/informational unless paired with another finding that they'd
+worsen (e.g. missing CSP alongside a confirmed XSS). Dalfox XSS output is an automated
+payload-based scan (not just a name/value pattern flag) — treat it as strong signal, though
+still note it should be manually confirmed before final reporting.
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -236,6 +248,21 @@ def render_html(domain, report, ctx):
     ssrf_rows = param_rows(ctx.get("ssrf_flags", []))
     idor_rows = param_rows(ctx.get("idor_flags", []))
 
+    cors_rows = ""
+    for c in ctx.get("cors_findings", []):
+        cors_rows += f"""<tr>
+          <td>{sev_badge(c.get('severity','low'))}</td>
+          <td><code>{html.escape(c.get('host',''))}</code></td>
+          <td>{html.escape(c.get('test',''))}</td>
+          <td>{'Yes' if c.get('credentials_allowed') else 'No'}</td>
+          <td>{html.escape(c.get('note',''))}</td>
+        </tr>"""
+
+    headers_rows = "".join(
+        f"<tr><td><code>{html.escape(h.get('host',''))}</code></td><td>{html.escape(', '.join(h.get('missing_headers', [])))}</td></tr>"
+        for h in ctx.get("hosts_missing_headers", [])
+    )
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -314,6 +341,18 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>IDOR</b></td><td><b>Example URLs</b></td></tr>
     {idor_rows or "<tr><td colspan='2'>None flagged.</td></tr>"}
+  </table>
+
+  <div class="section-title">CORS Misconfigurations</div>
+  <table>
+    <tr><td><b>Severity</b></td><td><b>Host</b></td><td><b>Test</b></td><td><b>Credentials?</b></td><td><b>Note</b></td></tr>
+    {cors_rows or "<tr><td colspan='5'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Missing Security Headers</div>
+  <table>
+    <tr><td><b>Host</b></td><td><b>Missing Headers</b></td></tr>
+    {headers_rows or "<tr><td colspan='2'>None — all hosts have baseline headers.</td></tr>"}
   </table>
 
   <div class="section-title">JS Secrets Triage</div>
