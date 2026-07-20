@@ -27,9 +27,10 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains resolve probe sensitive_files api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains permutation resolve probe sensitive_files api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
+  "Subdomain Permutation (alterx)"
   "DNS Resolution Check"
   "Probe Alive Hosts"
   "Sensitive File Exposure Check"
@@ -166,6 +167,32 @@ step_subdomains() {
   cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
   cd ..
   echo -e "${green}[+] Total unique subdomains: $(wc -l < all_subdomains.txt)${reset}"
+}
+
+step_permutation() {
+  mkdir -p permutation && cd permutation || return 1
+
+  if check_tool alterx && check_tool dnsx; then
+    run_with_progress "alterx" "candidates.txt" -- alterx -l ../all_subdomains.txt -o candidates.txt
+    if [[ -s candidates.txt ]]; then
+      run_with_progress "dnsx-permutation" "permuted_resolved.txt" -- \
+        dnsx -l candidates.txt -silent -o permuted_resolved.txt
+    else
+      touch permuted_resolved.txt
+    fi
+  else
+    echo -e "${yellow}  alterx and/or dnsx not found — skipping permutation (install: go install github.com/projectdiscovery/alterx/cmd/alterx@latest)${reset}"
+    touch permuted_resolved.txt
+  fi
+
+  local before after new_count
+  before=$(cat ../all_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
+  cat ../all_subdomains.txt permuted_resolved.txt 2>/dev/null | sed '/^$/d' | sort -u > ../all_subdomains.txt.tmp
+  mv ../all_subdomains.txt.tmp ../all_subdomains.txt
+  after=$(cat ../all_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
+  new_count=$((after - before))
+  cd ..
+  echo -e "${green}[+] Permutation discovered $new_count new resolvable subdomain(s) (total now: $after)${reset}"
 }
 
 step_resolve() {
@@ -373,7 +400,7 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,resolve,live,urls,params,nuclei,takeover,js,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,urls,params,nuclei,takeover,js,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
@@ -392,6 +419,7 @@ fi
 # RUN ALL STEPS (each one auto-skips if already checkpointed)
 ###############################################################################
 run_step subdomains      step_subdomains
+run_step permutation     step_permutation
 run_step resolve         step_resolve
 run_step probe           step_probe
 run_step sensitive_files step_sensitive_files
