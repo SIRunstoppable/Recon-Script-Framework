@@ -45,6 +45,8 @@ def build_context(domain):
     param_flags = read_json("report/interesting_params.json", {}) or {}
     api_findings = read_json("report/api_endpoints.json", {}) or {}
     cors_findings = read_json("report/cors_headers.json", {}) or {}
+    source_map_findings = read_json("report/source_maps.json", {}) or {}
+    wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
     high_conf_secrets = [s for s in all_secrets if s.get("confidence") == "high"][:100]
     low_conf_count = len([s for s in all_secrets if s.get("confidence") == "low"])
@@ -77,6 +79,17 @@ def build_context(domain):
         "cors_findings": cors_findings.get("cors_findings", [])[:60],
         "hosts_missing_headers": cors_findings.get("hosts_missing_headers", [])[:60],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
+        "source_maps_found": source_map_findings.get("maps_found", 0),
+        "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
+        "source_map_secrets": [
+            s for m in source_map_findings.get("maps", [])
+            for s in m.get("secrets", []) if s.get("confidence") == "high"
+        ][:60],
+        "source_map_endpoints": [
+            e for m in source_map_findings.get("maps", []) for e in m.get("endpoints", [])
+        ][:100],
+        "wordpress_sites": wp_findings.get("sites", []),
+        "wordpress_nuclei_findings": read_lines("wordpress/nuclei_wordpress.txt", 150),
         "js_files_count": len(
             [f for f in os.listdir("js") if f.endswith(".js")]
         ) if os.path.isdir("js") else 0,
@@ -112,6 +125,11 @@ RAW DATA:
 - CORS misconfigurations found (each is a confirmed, tested response header behavior — e.g. arbitrary Origin reflected back with credentials allowed): {json.dumps(ctx['cors_findings'])}
 - Hosts missing baseline security headers (CSP/X-Frame-Options/HSTS/X-Content-Type-Options): {json.dumps(ctx['hosts_missing_headers'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
+- Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
+- High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
+- Endpoints found inside recovered source maps: {json.dumps(ctx['source_map_endpoints'][:60])}
+- WordPress sites detected (version, confirmed indicators, xmlrpc.php reachability, and any usernames enumerated via the public /wp-json/wp/v2/users endpoint — username enumeration and an old disclosed version are real findings on their own, even before any CVE match): {json.dumps(ctx['wordpress_sites'])}
+- Nuclei WordPress-specific scan (core/plugin/theme CVE templates run only against confirmed WordPress hosts): {json.dumps(ctx['wordpress_nuclei_findings'])}
 - Number of JS files harvested: {ctx['js_files_count']}
 - HIGH-CONFIDENCE potential secrets found inside JS files (already filtered for entropy + placeholder patterns by a local scanner; format type/masked_value/confidence/reason/files): {json.dumps(ctx['js_secrets_found'])}
 - Additionally, {ctx['js_low_confidence_count']} low-confidence JS matches were filtered out already (placeholders / low entropy) — do not ask about these, they were pre-screened as noise.
@@ -132,7 +150,10 @@ credentials_allowed=true reflecting an arbitrary origin are serious (high/critic
 security headers alone are low/informational unless paired with another finding that they'd
 worsen (e.g. missing CSP alongside a confirmed XSS). Dalfox XSS output is an automated
 payload-based scan (not just a name/value pattern flag) — treat it as strong signal, though
-still note it should be manually confirmed before final reporting.
+still note it should be manually confirmed before final reporting. An exposed source map that
+recovers original source code is itself an information-disclosure finding worth listing (at
+least low/medium) even before considering what's inside it — recovered secrets on top of that
+push it higher.
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -263,6 +284,22 @@ def render_html(domain, report, ctx):
         for h in ctx.get("hosts_missing_headers", [])
     )
 
+    source_map_rows = "".join(
+        f"<tr><td>{html.escape(s.get('type',''))}</td><td><code>{html.escape(s.get('value_masked',''))}</code></td>"
+        f"<td><code>{html.escape(s.get('source_file',''))}</code></td></tr>"
+        for s in ctx.get("source_map_secrets", [])
+    )
+
+    wp_rows = ""
+    for w in ctx.get("wordpress_sites", []):
+        users = ", ".join(w.get("enumerated_usernames", [])) or "-"
+        wp_rows += f"""<tr>
+          <td><code>{html.escape(w.get('host',''))}</code></td>
+          <td>{html.escape(w.get('version') or 'unknown')}</td>
+          <td>{'Yes' if w.get('xmlrpc_enabled') else 'No'}</td>
+          <td>{html.escape(users)}</td>
+        </tr>"""
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -353,6 +390,19 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>Host</b></td><td><b>Missing Headers</b></td></tr>
     {headers_rows or "<tr><td colspan='2'>None — all hosts have baseline headers.</td></tr>"}
+  </table>
+
+  <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Found: {ctx.get('source_maps_found',0)} exposed .js.map file(s), {ctx.get('source_map_recovered_files',0)} original source file(s) recovered.</p>
+  <table>
+    <tr><td><b>Type</b></td><td><b>Masked Value</b></td><td><b>Original Source File</b></td></tr>
+    {source_map_rows or "<tr><td colspan='3'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">WordPress Sites</div>
+  <table>
+    <tr><td><b>Host</b></td><td><b>Version</b></td><td><b>xmlrpc.php reachable</b></td><td><b>Usernames enumerated</b></td></tr>
+    {wp_rows or "<tr><td colspan='4'>No WordPress sites detected.</td></tr>"}
   </table>
 
   <div class="section-title">JS Secrets Triage</div>

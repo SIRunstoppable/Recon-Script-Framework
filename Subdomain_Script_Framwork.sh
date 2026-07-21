@@ -20,6 +20,82 @@ fi
 red="\e[91m"; green="\e[92m"; blue="\e[94m"; yellow="\e[93m"
 cyan="\e[96m"; bold="\e[1m"; dim="\e[2m"; reset="\e[0m"
 
+# ---------- Dependency check ----------
+# name:required?  (required=yes means the script can barely function without it;
+# required=no means that step is skipped gracefully if missing)
+EXTERNAL_TOOLS=(
+  "python3:yes"      "curl:yes"          "subfinder:no"      "amass:no"
+  "sublist3r:no"      "gobuster:no"      "dnsx:no"           "alterx:no"
+  "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
+  "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
+)
+PYTHON_PACKAGES=("requests")
+
+check_dependencies() {
+  echo -e "${cyan}${bold}Dependency check${reset}"
+  echo -e "${dim}────────────────────────────────────────────────────────────${reset}"
+  local missing_required=0
+  local missing_optional=0
+
+  for entry in "${EXTERNAL_TOOLS[@]}"; do
+    local name="${entry%%:*}" required="${entry##*:}"
+    if command -v "$name" &> /dev/null; then
+      printf "  ${green}✓${reset} %-14s installed\n" "$name"
+    else
+      if [[ "$required" == "yes" ]]; then
+        printf "  ${red}✗${reset} %-14s MISSING (required — core steps will fail)\n" "$name"
+        missing_required=$((missing_required + 1))
+      else
+        printf "  ${yellow}⚠${reset} %-14s missing (optional — that step will be skipped)\n" "$name"
+        missing_optional=$((missing_optional + 1))
+      fi
+    fi
+  done
+
+  echo ""
+  echo -e "${cyan}Python packages${reset}"
+  for pkg in "${PYTHON_PACKAGES[@]}"; do
+    if python3 -c "import $pkg" &> /dev/null; then
+      printf "  ${green}✓${reset} %-14s installed\n" "$pkg"
+    else
+      printf "  ${red}✗${reset} %-14s MISSING — run: pip install %s --break-system-packages\n" "$pkg" "$pkg"
+      missing_required=$((missing_required + 1))
+    fi
+  done
+
+  echo ""
+  if [[ -n "$GEMINI_API_KEY" ]]; then
+    echo -e "  ${green}✓${reset} GEMINI_API_KEY is set"
+  else
+    echo -e "  ${yellow}⚠${reset} GEMINI_API_KEY not set (.env missing or empty) — the AI report step will be skipped"
+  fi
+
+  echo ""
+  echo -e "${dim}────────────────────────────────────────────────────────────${reset}"
+  if [[ $missing_required -gt 0 ]]; then
+    echo -e "${red}$missing_required required item(s) missing.${reset} Install them before running."
+  else
+    echo -e "${green}All required items present.${reset} $missing_optional optional tool(s) missing — those steps will auto-skip."
+  fi
+
+  echo ""
+  echo -e "${dim}Install hints (ProjectDiscovery tools via go install, e.g.):${reset}"
+  echo -e "${dim}  go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest${reset}"
+  echo -e "${dim}  go install github.com/projectdiscovery/httpx/cmd/httpx@latest${reset}"
+  echo -e "${dim}  go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest${reset}"
+  echo -e "${dim}  go install github.com/projectdiscovery/alterx/cmd/alterx@latest${reset}"
+  echo -e "${dim}  go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest${reset}"
+  echo -e "${dim}  go install github.com/hahwul/dalfox/v2@latest${reset}"
+  echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
+  echo -e "${dim}  go install github.com/lc/gau/v2/cmd/gau@latest${reset}"
+  echo -e "${dim}  pip install requests --break-system-packages${reset}"
+}
+
+if [[ "$1" == "--check-deps" || "$1" == "-check-deps" ]]; then
+  check_dependencies
+  exit 0
+fi
+
 # ---------- Config ----------
 # GEMINI_API_KEY comes from .env (see .env.example)
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.0-flash}"   # check https://ai.google.dev/gemini-api/docs/models for current names
@@ -27,13 +103,14 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve probe sensitive_files api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js ai_report)
+STEP_KEYS=(subdomains permutation resolve probe sensitive_files wordpress api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js source_maps ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
   "DNS Resolution Check"
   "Probe Alive Hosts"
   "Sensitive File Exposure Check"
+  "WordPress Detection + Vuln Scan"
   "API Endpoint Extraction (Swagger/GraphQL)"
   "CORS + Security Headers Check"
   "Collect URLs (Wayback/GAU)"
@@ -44,6 +121,7 @@ STEP_LABELS=(
   "Subdomain Takeover Check"
   "Sensitive Keyword Grep"
   "JavaScript File Harvest"
+  "Exposed Source Map Recovery"
   "AI Attack Surface Report"
 )
 TOTAL_STEPS=${#STEP_KEYS[@]}
@@ -233,6 +311,20 @@ step_sensitive_files() {
   python3 check_sensitive_files.py
 }
 
+step_wordpress() {
+  mkdir -p wordpress report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping WordPress scan${reset}"
+    return 0
+  fi
+  python3 wordpress_scan.py
+
+  if [[ -s wordpress/wp_hosts.txt ]] && check_tool nuclei; then
+    run_with_progress "nuclei-wordpress" "wordpress/nuclei_wordpress.txt" -- \
+      nuclei -l wordpress/wp_hosts.txt -tags wordpress,wp-plugin,wp-theme,cve -o wordpress/nuclei_wordpress.txt
+  fi
+}
+
 step_api_extraction() {
   mkdir -p report
   if ! command -v python3 &> /dev/null; then
@@ -361,6 +453,19 @@ step_js() {
   cd ..
 }
 
+step_source_maps() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping source map check${reset}"
+    return 0
+  fi
+  if [[ ! -s js/js_urls.txt ]]; then
+    echo -e "${yellow}  no JS urls collected — skipping source map check${reset}"
+    return 0
+  fi
+  python3 extract_source_maps.py
+}
+
 step_ai_report() {
   if [[ -z "$GEMINI_API_KEY" ]]; then
     echo -e "${red}  ⚠ GEMINI_API_KEY not set - skipping AI report.${reset}"
@@ -400,12 +505,14 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,urls,params,nuclei,takeover,js,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,urls,params,nuclei,takeover,js,wordpress,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/wordpress_scan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/extract_source_maps.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
 touch "$CHECKPOINT_FILE"
@@ -423,6 +530,7 @@ run_step permutation     step_permutation
 run_step resolve         step_resolve
 run_step probe           step_probe
 run_step sensitive_files step_sensitive_files
+run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction
 run_step cors_headers    step_cors_headers
 run_step urls            step_urls
@@ -433,6 +541,7 @@ run_step nuclei          step_nuclei
 run_step takeover        step_takeover
 run_step keywords        step_keywords
 run_step js              step_js
+run_step source_maps     step_source_maps
 run_step ai_report       step_ai_report
 
 echo ""
