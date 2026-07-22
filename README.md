@@ -49,7 +49,25 @@ missing.
 | `subjack` | Subdomain Takeover | `go install github.com/haccer/subjack@latest` |
 | `dalfox` | XSS Scan | `go install github.com/hahwul/dalfox/v2@latest` |
 
-### 1.3 Secrets — `.env`
+### 1.3 Scope — `scope.txt`
+```bash
+cp scope.txt.example scope.txt
+nano scope.txt   # list domains you're authorized to test
+```
+Before touching anything, the script checks the domain you enter against
+`scope.txt` and **refuses to run if it's not covered**. Format:
+```
+*.example.com              # matches example.com and every subdomain
+example.com                # matches only that exact host
+!internal.example.com      # explicit exclusion, wins over any match above
+```
+If `scope.txt` doesn't exist yet, the script offers to create one
+pre-filled with the domain you type in — but for a real engagement, build
+`scope.txt` from the program's official scope definition rather than
+relying on that shortcut, since it just trusts whatever you typed.
+`scope.txt` is git-ignored (it may reflect a private program's scope).
+
+### 1.4 Secrets — `.env`
 ```bash
 cp .env.example .env
 nano .env   # set GEMINI_API_KEY=AIza...
@@ -59,7 +77,7 @@ Get a key at https://aistudio.google.com/apikey. The model used is set via
 `GEMINI_MODEL` in `.env` (defaults to `gemini-2.0-flash` — check
 https://ai.google.dev/gemini-api/docs/models for current names).
 
-### 1.4 Files that must sit next to `recon-framework.sh`
+### 1.5 Files that must sit next to `recon-framework.sh`
 The shell script copies these into each run's output folder automatically —
 just keep them all in the same directory:
 ```
@@ -74,6 +92,7 @@ extract_source_maps.py
 generate_ai_report.py
 requirements.txt
 .env.example
+scope.txt.example
 .gitignore
 ```
 

@@ -1,0 +1,20 @@
+# Copy this file to scope.txt and fill in domains you have written
+# authorization to test:
+#   cp scope.txt.example scope.txt
+#
+# scope.txt itself is git-ignored — it may reflect a private program's
+# scope, so don't commit your real one.
+#
+# Format: one pattern per line.
+#   *.example.com    -> matches example.com AND any subdomain of it
+#   example.com      -> matches only that exact host, not subdomains
+#   !internal.example.com  -> explicit exclusion, wins over any match above it
+#
+# If scope.txt doesn't exist, the script will offer to create one
+# automatically (pre-filled with the domain you type in) on first run —
+# but for real engagements, fill this in yourself from the program's
+# official scope definition rather than relying on that shortcut.
+
+*.example.com
+example.com
+!internal.example.com

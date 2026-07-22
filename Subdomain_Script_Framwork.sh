@@ -64,6 +64,13 @@ check_dependencies() {
   done
 
   echo ""
+  if [[ -f "$SCRIPT_DIR/scope.txt" ]]; then
+    echo -e "  ${green}✓${reset} scope.txt found"
+  else
+    echo -e "  ${yellow}⚠${reset} scope.txt not found — you'll be prompted to create one on first run"
+  fi
+
+  echo ""
   if [[ -n "$GEMINI_API_KEY" ]]; then
     echo -e "  ${green}✓${reset} GEMINI_API_KEY is set"
   else
@@ -475,6 +482,82 @@ step_ai_report() {
   python3 generate_ai_report.py "$domain" "$GEMINI_MODEL"
 }
 
+# ---------- Scope validation ----------
+# scope.txt lives next to this script (not inside a run folder) so it
+# persists across runs/domains. One pattern per line:
+#   *.example.com   -> matches example.com and any subdomain
+#   example.com     -> matches only that exact host
+#   !internal.example.com -> explicit exclusion, wins over any include match
+scope_pattern_matches() {
+  local domain="$1" pattern="$2"
+  if [[ "$pattern" == \*.* ]]; then
+    local base="${pattern#\*.}"
+    [[ "$domain" == "$base" || "$domain" == *".$base" ]]
+  else
+    [[ "$domain" == "$pattern" ]]
+  fi
+}
+
+check_scope() {
+  local domain="$1"
+  local scope_file="$SCRIPT_DIR/scope.txt"
+
+  if [[ ! -f "$scope_file" ]]; then
+    echo -e "${yellow}${bold}No scope.txt found next to this script.${reset}"
+    echo -e "${dim}scope.txt records which domains you're authorized to test, and gets checked automatically on every future run.${reset}"
+    read -p "Do you have written authorization to test '$domain'? Confirm to create scope.txt [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      echo -e "${red}Aborting — no scope file and authorization not confirmed.${reset}"
+      exit 1
+    fi
+    {
+      echo "# Scope file for recon-framework.sh — one pattern per line."
+      echo "# '*.domain.com' matches domain.com and every subdomain."
+      echo "# 'domain.com' matches only that exact host."
+      echo "# Prefix a line with '!' to explicitly exclude something (wins over any match above it)."
+      echo "*.${domain}"
+      echo "${domain}"
+    } > "$scope_file"
+    echo -e "${green}Created $scope_file with *.${domain} and ${domain}${reset}"
+    return 0
+  fi
+
+  local includes=() excludes=()
+  while IFS= read -r line; do
+    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" == !* ]]; then
+      excludes+=("${line#!}")
+    else
+      includes+=("$line")
+    fi
+  done < "$scope_file"
+
+  local in_scope=0
+  for pattern in "${includes[@]}"; do
+    if scope_pattern_matches "$domain" "$pattern"; then
+      in_scope=1
+      break
+    fi
+  done
+  if [[ $in_scope -eq 1 ]]; then
+    for pattern in "${excludes[@]}"; do
+      if scope_pattern_matches "$domain" "$pattern"; then
+        in_scope=0
+        break
+      fi
+    done
+  fi
+
+  if [[ $in_scope -eq 0 ]]; then
+    echo -e "${red}${bold}✗ '$domain' is NOT covered by $scope_file — refusing to scan.${reset}"
+    echo -e "${dim}Add a matching line (e.g. *.${domain}) to $scope_file if you're authorized, then re-run.${reset}"
+    exit 1
+  fi
+
+  echo -e "${green}✓ '$domain' is in scope ($scope_file validated)${reset}"
+}
+
 ###############################################################################
 # START
 ###############################################################################
@@ -484,6 +567,8 @@ read -p "🔎 Enter target domain (must be in your bug bounty scope): " domain
 if [[ -z "$domain" ]]; then
   echo -e "${red}No domain given, exiting.${reset}"; exit 1
 fi
+
+check_scope "$domain"
 
 # ---------- Resume detection ----------
 mapfile -t existing_dirs < <(ls -d recon-"${domain}"-* 2>/dev/null | sort -r)

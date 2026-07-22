@@ -1,14 +1,16 @@
 # Secrets - never commit real keys
 .env
- 
+
+# Scope file may reflect a private bug bounty program's scope
+scope.txt
+
 # Generated recon output (one folder per run, contains raw scan data)
 recon-*/
- 
+
 # Python
 __pycache__/
 *.pyc
- 
+
 # OS / editor junk
 .DS_Store
 .vscode/
- 
