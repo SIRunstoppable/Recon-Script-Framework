@@ -110,7 +110,7 @@ THREADS=100
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve probe sensitive_files wordpress api_extraction cors_headers urls params param_flagging xss nuclei takeover keywords js source_maps ai_report)
+STEP_KEYS=(subdomains permutation resolve probe sensitive_files wordpress api_extraction cors_headers misconfig urls params param_flagging xss nuclei takeover keywords js source_maps ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
@@ -120,6 +120,7 @@ STEP_LABELS=(
   "WordPress Detection + Vuln Scan"
   "API Endpoint Extraction (Swagger/GraphQL)"
   "CORS + Security Headers Check"
+  "Security Misconfiguration Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
   "Open Redirect / SSRF / IDOR Flagging"
@@ -348,6 +349,15 @@ step_cors_headers() {
     return 0
   fi
   python3 check_cors_headers.py
+}
+
+step_misconfig() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping misconfig check${reset}"
+    return 0
+  fi
+  python3 check_misconfig.py
 }
 
 step_urls() {
@@ -597,6 +607,7 @@ cp "$SCRIPT_DIR/wordpress_scan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_source_maps.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
 cd "$WORKDIR" || exit 1
@@ -618,6 +629,7 @@ run_step sensitive_files step_sensitive_files
 run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction
 run_step cors_headers    step_cors_headers
+run_step misconfig       step_misconfig
 run_step urls            step_urls
 run_step params          step_params
 run_step param_flagging  step_param_flagging

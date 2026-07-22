@@ -45,6 +45,7 @@ def build_context(domain):
     param_flags = read_json("report/interesting_params.json", {}) or {}
     api_findings = read_json("report/api_endpoints.json", {}) or {}
     cors_findings = read_json("report/cors_headers.json", {}) or {}
+    misconfig_findings = read_json("report/misconfig.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -78,6 +79,7 @@ def build_context(domain):
         ][:20],
         "cors_findings": cors_findings.get("cors_findings", [])[:60],
         "hosts_missing_headers": cors_findings.get("hosts_missing_headers", [])[:60],
+        "misconfig_findings": misconfig_findings.get("findings", [])[:150],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -124,6 +126,7 @@ RAW DATA:
 - GraphQL endpoints where introspection is ENABLED (schema was successfully read — flag introspection-enabled-in-production as its own finding, then look at query/mutation names for anything sensitive like delete/admin/impersonate/export): {json.dumps(ctx['graphql_endpoints'])}
 - CORS misconfigurations found (each is a confirmed, tested response header behavior — e.g. arbitrary Origin reflected back with credentials allowed): {json.dumps(ctx['cors_findings'])}
 - Hosts missing baseline security headers (CSP/X-Frame-Options/HSTS/X-Content-Type-Options): {json.dumps(ctx['hosts_missing_headers'])}
+- Security misconfiguration findings — CSP/HSTS/X-Frame-Options quality issues, insecure cookies (missing Secure/HttpOnly/SameSite), directory listing, debug headers/verbose Server banners, and exposed health/metrics endpoints (each already tagged with a severity by the scanner — treat those as a starting point, adjust if the evidence suggests otherwise): {json.dumps(ctx['misconfig_findings'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -300,6 +303,17 @@ def render_html(domain, report, ctx):
           <td>{html.escape(users)}</td>
         </tr>"""
 
+    misconfig_rows = ""
+    for m in ctx.get("misconfig_findings", []):
+        extra = m.get("url") or m.get("cookie") or ""
+        detail = m.get("detail") or m.get("response_preview", "")
+        misconfig_rows += f"""<tr>
+          <td>{sev_badge(m.get('severity','low'))}</td>
+          <td>{html.escape(m.get('category',''))}</td>
+          <td><code>{html.escape(m.get('host',''))}</code> {html.escape(str(extra))}</td>
+          <td>{html.escape(str(detail))[:200]}</td>
+        </tr>"""
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -390,6 +404,13 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>Host</b></td><td><b>Missing Headers</b></td></tr>
     {headers_rows or "<tr><td colspan='2'>None — all hosts have baseline headers.</td></tr>"}
+  </table>
+
+  <div class="section-title">Security Misconfigurations</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">CSP/HSTS/X-Frame-Options quality, insecure cookies, directory listing, debug headers, exposed health endpoints.</p>
+  <table>
+    <tr><td><b>Severity</b></td><td><b>Category</b></td><td><b>Host</b></td><td><b>Detail</b></td></tr>
+    {misconfig_rows or "<tr><td colspan='4'>None found.</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
