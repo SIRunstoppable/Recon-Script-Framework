@@ -54,8 +54,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import throttle, MAX_WORKERS
+
 TIMEOUT = 8
-MAX_WORKERS = 15
 
 CICD_K8S_PATHS = [
     "/.github/workflows/main.yml", "/.github/workflows/ci.yml", "/.github/workflows/deploy.yml",
@@ -88,12 +89,18 @@ def bucket_name_candidates(domain):
 def check_s3_bucket(name):
     for url in (f"https://{name}.s3.amazonaws.com", f"https://s3.amazonaws.com/{name}"):
         try:
+            throttle()
             r = requests.get(url, timeout=TIMEOUT, verify=False)
         except Exception:
             continue
+        # Real S3 always sets this Server header — required so a generic 403 from a
+        # WAF/corporate proxy/network block page isn't mistaken for a real bucket.
+        is_real_s3 = "amazons3" in r.headers.get("Server", "").lower() or "<Error>" in r.text
+        if not is_real_s3:
+            continue
         if r.status_code == 200 and ("<ListBucketResult" in r.text or "<Contents>" in r.text):
             return {"provider": "AWS S3", "bucket": name, "url": url, "status": "PUBLIC - listable"}
-        elif r.status_code == 403:
+        elif r.status_code == 403 and "AccessDenied" in r.text:
             return {"provider": "AWS S3", "bucket": name, "url": url, "status": "exists, access denied"}
     return None
 
@@ -101,12 +108,18 @@ def check_s3_bucket(name):
 def check_azure_blob(name):
     url = f"https://{name}.blob.core.windows.net/?comp=list"
     try:
+        throttle()
         r = requests.get(url, timeout=TIMEOUT, verify=False)
     except Exception:
         return None
+    # Real Azure Blob Storage always sets this Server header — same false-positive
+    # guard as check_s3_bucket, since a block page can also return 403/200.
+    is_real_azure = "windows-azure-blob" in r.headers.get("Server", "").lower() or "<Error>" in r.text
+    if not is_real_azure:
+        return None
     if r.status_code == 200 and "<EnumerationResults" in r.text:
         return {"provider": "Azure Blob", "bucket": name, "url": url, "status": "PUBLIC - listable"}
-    elif r.status_code == 403:
+    elif r.status_code == 403 and ("AuthenticationFailed" in r.text or "PublicAccessNotPermitted" in r.text):
         return {"provider": "Azure Blob", "bucket": name, "url": url, "status": "exists, access denied"}
     return None
 
@@ -198,6 +211,7 @@ def read_hosts(path="live/httpx_live.txt"):
 def get_baseline(host):
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=14))
     try:
+        throttle()
         r = requests.get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
         return r.status_code, len(r.content)
     except Exception:
@@ -209,6 +223,7 @@ def check_cicd_k8s(host):
     base_status, base_len = get_baseline(host)
     for path in CICD_K8S_PATHS:
         try:
+            throttle()
             r = requests.get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue

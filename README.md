@@ -77,16 +77,31 @@ Get a key at https://aistudio.google.com/apikey. The model used is set via
 `GEMINI_MODEL` in `.env` (defaults to `gemini-2.0-flash` — check
 https://ai.google.dev/gemini-api/docs/models for current names).
 
-### 1.5 Files that must sit next to `recon-framework.sh`
+### 1.5 Rate limiting / concurrency
+Every active-scanning step — external tools and the Python helper scripts
+alike — shares two knobs, settable in `.env`:
+```
+RECON_RATE_LIMIT=10      # requests/sec cap, shared across ALL threads in a step (0 = unlimited)
+RECON_MAX_WORKERS=15     # thread/worker count
+```
+This is a *shared* limiter, not per-thread — raising `RECON_MAX_WORKERS` doesn't
+let a step exceed `RECON_RATE_LIMIT` in aggregate against the target. Lower
+`RECON_RATE_LIMIT` (e.g. `3`) if the target has a sensitive WAF, or raise both
+if you have explicit permission for more aggressive testing.
+
+### 1.6 Files that must sit next to `recon-framework.sh`
 The shell script copies these into each run's output folder automatically —
 just keep them all in the same directory:
 ```
 recon-framework.sh
+rate_limiter.py            # shared by every script below — required, not optional
 scan_js_secrets.py
 check_sensitive_files.py
 wordpress_scan.py
 extract_api_endpoints.py
 check_cors_headers.py
+check_misconfig.py
+check_cloud_exposure.py
 flag_interesting_params.py
 extract_source_maps.py
 generate_ai_report.py
@@ -123,7 +138,7 @@ report because `GEMINI_API_KEY` wasn't set yet) will simply retry next time.
 
 | # | Step | What it does | Depends on |
 |---|---|---|---|
-| 1 | **Subdomain Enumeration** | Runs subfinder/amass/sublist3r/gobuster, merges + dedupes into `all_subdomains.txt` | target domain |
+| 1 | **Subdomain Enumeration** | Runs subfinder/amass/sublist3r/gobuster, merges + dedupes into `all_subdomains.txt` | target domain (scope-checked first, see §1.3) |
 | 2 | **Subdomain Permutation** | `alterx` generates candidate variations (`dev-api.`, `staging.`...) from step 1's results; `dnsx` keeps only ones that actually resolve; merges back into `all_subdomains.txt` | step 1 |
 | 3 | **DNS Resolution Check** | `dnsx` filters the full subdomain list down to `resolved_subdomains.txt` so later steps don't waste time probing dead hosts. (Deliberately **not** used for the takeover check — dangling/non-resolving CNAMEs are exactly what that step looks for.) | steps 1–2 |
 | 4 | **Probe Alive Hosts** | `httpx` checks which resolved hosts are actually serving HTTP(S), grabs title/tech/status/IP | step 3 |
@@ -131,16 +146,18 @@ report because `GEMINI_API_KEY` wasn't set yet) will simply retry next time.
 | 6 | **WordPress Detection + Vuln Scan** | Confirms WordPress via tech-detect + active checks (`wp-login.php`, `wp-json`), reads version from `readme.html`, enumerates usernames via the public `/wp-json/wp/v2/users` endpoint, checks `xmlrpc.php` reachability, then runs nuclei's WordPress core/plugin/theme CVE templates against confirmed hosts only | step 4 |
 | 7 | **API Endpoint Extraction** | Probes for exposed OpenAPI/Swagger specs (parses `paths` to list every documented endpoint+method) and GraphQL introspection (lists every query/mutation if introspection is enabled) | step 4 |
 | 8 | **CORS + Security Headers Check** | Sends requests with crafted `Origin` headers (arbitrary origin, `null`, prefix/suffix substring tricks) to catch reflected-origin and other CORS misconfigs; also flags missing CSP/X-Frame-Options/HSTS/X-Content-Type-Options | step 4 |
-| 9 | **Collect URLs** | `waybackurls` + `gau` pull historical URLs for every live host | step 4 |
-| 10 | **Parameter Discovery** | Splits URLs into with/without query params; runs `arjun` (hidden param brute-force) and `paramspider` | step 9 |
-| 11 | **Open Redirect / SSRF / IDOR Flagging** | **Passive** — no requests sent. Classifies query parameter names+values against known-risky patterns (`redirect=`, `url=`, numeric `id=`...) with a strong/weak confidence signal | step 10 |
-| 12 | **XSS Scan (dalfox)** | Runs `dalfox` against every collected parameterized URL | step 10 |
-| 13 | **Nuclei Vulnerability Scan** | Three passes: all severities, high/critical only, and a broader `-tags exposure,misconfig,default-login,...` pass to catch "easy win" bugs nuclei itself rates as low/info severity | step 4 |
-| 14 | **Subdomain Takeover Check** | `subjack` against the **full unfiltered** subdomain list | step 1 |
-| 15 | **Sensitive Keyword Grep** | Greps collected URLs for `admin`, `debug`, `token`, `internal`, etc. | step 9 |
-| 16 | **JavaScript File Harvest** | Downloads every `.js` file referenced in collected URLs, then scans them for secrets (AWS/Google/Slack/Stripe/GitHub keys, JWTs, private keys...) and hidden endpoints. Each secret gets a `confidence: high/low` score from Shannon entropy + a placeholder-word denylist, to cut false positives | step 9 |
-| 17 | **Exposed Source Map Recovery** | Looks for `.js.map` files (via the `sourceMappingURL` comment or the `<file>.map` convention). If found, reconstructs the **original unminified source code** from `sourcesContent` and runs the same secret/endpoint scanner from step 16 against it — unminified code is far more readable and often reveals more | step 16 |
-| 18 | **AI Attack Surface Report** | Sends a condensed summary of every step's findings to Gemini, gets back a structured risk assessment, writes `report/attack_surface_report.html` (dashboard) + `.json` | all steps |
+| 9 | **Security Misconfiguration Check** | Goes deeper than step 8's presence-check: CSP/HSTS/X-Frame-Options *quality* (unsafe-inline, short max-age...), insecure cookies (missing Secure/HttpOnly/SameSite), directory listing pages, verbose debug headers/stack traces, and exposed health/metrics endpoints | step 4 |
+| 10 | **Collect URLs** | `waybackurls` + `gau` pull historical URLs for every live host | step 4 |
+| 11 | **Parameter Discovery** | Splits URLs into with/without query params; runs `arjun` (hidden param brute-force) and `paramspider` | step 10 |
+| 12 | **Open Redirect / SSRF / IDOR Flagging** | **Passive** — no requests sent. Classifies query parameter names+values against known-risky patterns (`redirect=`, `url=`, numeric `id=`...) with a strong/weak confidence signal | step 11 |
+| 13 | **XSS Scan (dalfox)** | Runs `dalfox` against every collected parameterized URL | step 11 |
+| 14 | **Nuclei Vulnerability Scan** | Three passes: all severities, high/critical only, and a broader `-tags exposure,misconfig,default-login,...` pass to catch "easy win" bugs nuclei itself rates as low/info severity | step 4 |
+| 15 | **Subdomain Takeover Check** | `subjack` against the **full unfiltered** subdomain list | step 1 |
+| 16 | **Sensitive Keyword Grep** | Greps collected URLs for `admin`, `debug`, `token`, `internal`, etc. | step 10 |
+| 17 | **JavaScript File Harvest** | Downloads every `.js` file referenced in collected URLs, then scans them for secrets (AWS/Google/Slack/Stripe/GitHub keys, JWTs, private keys...) and hidden endpoints. Each secret gets a `confidence: high/low` score from Shannon entropy + a placeholder-word denylist, to cut false positives | step 10 |
+| 18 | **Cloud Exposure** | Guesses + actively checks S3/Azure bucket names derived from the domain; passively extracts bucket references already seen in collected URLs/JS; searches GitHub for related public repos; probes for exposed CI/CD and Docker/Kubernetes config files | steps 4, 10, 17 |
+| 19 | **Exposed Source Map Recovery** | Looks for `.js.map` files (via the `sourceMappingURL` comment or the `<file>.map` convention). If found, reconstructs the **original unminified source code** from `sourcesContent` and runs the same secret/endpoint scanner from step 17 against it — unminified code is far more readable and often reveals more | step 17 |
+| 20 | **AI Attack Surface Report** | Sends a condensed summary of every step's findings to Gemini, gets back a structured risk assessment, writes `report/attack_surface_report.html` (dashboard) + `.json` | all steps |
 
 ---
 
@@ -167,6 +184,8 @@ recon-<domain>-<timestamp>/
     ├── sensitive_files.json/.txt
     ├── api_endpoints.json/.txt
     ├── cors_headers.json/.txt
+    ├── misconfig.json/.txt
+    ├── cloud_exposure.json/.txt
     ├── interesting_params.json/.txt
     ├── js_findings.json/.txt
     ├── source_maps.json/.txt

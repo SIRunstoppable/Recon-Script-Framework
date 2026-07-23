@@ -106,7 +106,15 @@ fi
 # ---------- Config ----------
 # GEMINI_API_KEY comes from .env (see .env.example)
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.0-flash}"   # check https://ai.google.dev/gemini-api/docs/models for current names
-THREADS=100
+
+# Centralized rate-limit / concurrency knobs — override in .env if needed.
+# These apply to every active-scanning step, external tool AND Python helper
+# script alike, so raising concurrency in one place doesn't leave other
+# steps still hammering the target at a different, uncoordinated rate.
+RATE_LIMIT="${RECON_RATE_LIMIT:-10}"     # requests/sec cap (shared, not per-thread) for the Python scanners
+THREADS="${RECON_MAX_WORKERS:-15}"       # worker/thread count for both external tools and Python scanners
+export RECON_RATE_LIMIT="$RATE_LIMIT"
+export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
@@ -249,7 +257,7 @@ step_subdomains() {
   check_tool amass     && run_with_progress "amass"     "amass.txt"     -- amass enum -d "$domain" -o amass.txt
   check_tool sublist3r && run_with_progress "sublist3r" "sublist3r.txt" -- sublist3r -d "$domain" -o sublist3r.txt
   check_tool gobuster  && run_with_progress "gobuster"  "gobuster.txt"  -- \
-    gobuster dns -d "$domain" -r /etc/resolv.conf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --wildcard -q -o gobuster.txt
+    gobuster dns -d "$domain" -r /etc/resolv.conf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --wildcard -q -t "$THREADS" -o gobuster.txt
 
   cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
   cd ..
@@ -263,7 +271,7 @@ step_permutation() {
     run_with_progress "alterx" "candidates.txt" -- alterx -l ../all_subdomains.txt -o candidates.txt
     if [[ -s candidates.txt ]]; then
       run_with_progress "dnsx-permutation" "permuted_resolved.txt" -- \
-        dnsx -l candidates.txt -silent -o permuted_resolved.txt
+        dnsx -l candidates.txt -silent -rate-limit "$RATE_LIMIT" -t "$THREADS" -o permuted_resolved.txt
     else
       touch permuted_resolved.txt
     fi
@@ -286,7 +294,7 @@ step_resolve() {
   mkdir -p resolve && cd resolve || return 1
   if check_tool dnsx; then
     run_with_progress "dnsx" "resolved_subdomains.txt" -- \
-      dnsx -l ../all_subdomains.txt -silent -o resolved_subdomains.txt
+      dnsx -l ../all_subdomains.txt -silent -rate-limit "$RATE_LIMIT" -t "$THREADS" -o resolved_subdomains.txt
   else
     echo -e "${yellow}  dnsx not found — skipping resolution filter, all subdomains will be probed as-is${reset}"
     cp ../all_subdomains.txt resolved_subdomains.txt
@@ -305,7 +313,7 @@ step_probe() {
   [[ -f "$target_list" ]] || target_list="../all_subdomains.txt"  # fallback for old runs without a resolve step
   if check_tool httpx; then
     run_with_progress "httpx" "httpx_live.txt" -- \
-      httpx -l "$target_list" -title -tech-detect -status-code -ip -o httpx_live.txt
+      httpx -l "$target_list" -title -tech-detect -status-code -ip -rate-limit "$RATE_LIMIT" -threads "$THREADS" -o httpx_live.txt
   fi
   cd ..
   echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
@@ -330,7 +338,7 @@ step_wordpress() {
 
   if [[ -s wordpress/wp_hosts.txt ]] && check_tool nuclei; then
     run_with_progress "nuclei-wordpress" "wordpress/nuclei_wordpress.txt" -- \
-      nuclei -l wordpress/wp_hosts.txt -tags wordpress,wp-plugin,wp-theme,cve -o wordpress/nuclei_wordpress.txt
+      nuclei -l wordpress/wp_hosts.txt -tags wordpress,wp-plugin,wp-theme,cve -rate-limit "$RATE_LIMIT" -c "$THREADS" -o wordpress/nuclei_wordpress.txt
   fi
 }
 
@@ -381,7 +389,7 @@ step_params() {
   grep -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_with_params.txt
   grep -v -E "\?" ../urls/all_urls.txt 2>/dev/null | sort -u > urls_no_params.txt
   check_tool arjun && run_with_progress "arjun" "arjun_out.txt" -- \
-    arjun -i urls_no_params.txt -o arjun_out.txt
+    arjun -i urls_no_params.txt -t "$THREADS" -o arjun_out.txt
 
   cat ../urls/all_urls.txt 2>/dev/null | awk -F/ '{print $3}' | grep -E "(\.|^)${domain}$" | sort -u > for_paramspider.txt
   check_tool paramspider && run_with_progress "paramspider" "" -- paramspider -l for_paramspider.txt
@@ -408,21 +416,22 @@ step_xss() {
   fi
   cd nuclei || return 1
   run_with_progress "dalfox" "dalfox_xss.txt" -- \
-    dalfox file ../params/urls_with_params.txt --silence --no-color -o dalfox_xss.txt
+    dalfox file ../params/urls_with_params.txt --silence --no-color -w "$THREADS" -o dalfox_xss.txt
   cd ..
 }
 
 step_nuclei() {
   mkdir -p nuclei && cd nuclei || return 1
   if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
-    run_with_progress "nuclei-all"      "nuclei_result.txt"   -- nuclei -l ../live/httpx_live.txt -o nuclei_result.txt
-    run_with_progress "nuclei-critical" "nuclei_critical.txt" -- nuclei -l ../live/httpx_live.txt -severity high,critical -o nuclei_critical.txt
+    run_with_progress "nuclei-all"      "nuclei_result.txt"   -- nuclei -l ../live/httpx_live.txt -rate-limit "$RATE_LIMIT" -c "$THREADS" -o nuclei_result.txt
+    run_with_progress "nuclei-critical" "nuclei_critical.txt" -- nuclei -l ../live/httpx_live.txt -severity high,critical -rate-limit "$RATE_LIMIT" -c "$THREADS" -o nuclei_critical.txt
     # Severity alone misses a lot of "easy win" bugs that nuclei tags as info/low/medium
     # (exposed panels, default creds, leaked .git/backup files, debug endpoints, tokens...).
     # These are usually trivial to exploit even though their CVSS-style severity is low.
     run_with_progress "nuclei-exposures" "nuclei_exposures.txt" -- \
       nuclei -l ../live/httpx_live.txt \
         -tags exposure,misconfig,default-login,token,git,backup,exposed-panel,config,listing \
+        -rate-limit "$RATE_LIMIT" -c "$THREADS" \
         -o nuclei_exposures.txt
   fi
   cd ..
@@ -612,6 +621,7 @@ fi
 
 mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,urls,params,nuclei,takeover,js,wordpress,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/wordpress_scan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
