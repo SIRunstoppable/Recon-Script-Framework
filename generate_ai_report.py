@@ -46,6 +46,7 @@ def build_context(domain):
     api_findings = read_json("report/api_endpoints.json", {}) or {}
     cors_findings = read_json("report/cors_headers.json", {}) or {}
     misconfig_findings = read_json("report/misconfig.json", {}) or {}
+    cloud_findings = read_json("report/cloud_exposure.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -80,6 +81,10 @@ def build_context(domain):
         "cors_findings": cors_findings.get("cors_findings", [])[:60],
         "hosts_missing_headers": cors_findings.get("hosts_missing_headers", [])[:60],
         "misconfig_findings": misconfig_findings.get("findings", [])[:150],
+        "cloud_buckets_active": cloud_findings.get("buckets_found_active", []),
+        "cloud_buckets_passive": cloud_findings.get("buckets_found_passive", []),
+        "github_repos": cloud_findings.get("github_repos", [])[:10],
+        "exposed_cicd_k8s_files": cloud_findings.get("exposed_cicd_k8s_files", [])[:60],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -127,6 +132,10 @@ RAW DATA:
 - CORS misconfigurations found (each is a confirmed, tested response header behavior — e.g. arbitrary Origin reflected back with credentials allowed): {json.dumps(ctx['cors_findings'])}
 - Hosts missing baseline security headers (CSP/X-Frame-Options/HSTS/X-Content-Type-Options): {json.dumps(ctx['hosts_missing_headers'])}
 - Security misconfiguration findings — CSP/HSTS/X-Frame-Options quality issues, insecure cookies (missing Secure/HttpOnly/SameSite), directory listing, debug headers/verbose Server banners, and exposed health/metrics endpoints (each already tagged with a severity by the scanner — treat those as a starting point, adjust if the evidence suggests otherwise): {json.dumps(ctx['misconfig_findings'])}
+- Cloud storage buckets found via active name-guessing (confirmed to exist — "PUBLIC - listable" means fully open, "exists, access denied" just confirms the name is real): {json.dumps(ctx['cloud_buckets_active'])}
+- Cloud storage bucket references found passively in the app's own collected URLs/JS (confirmed real usage, existence not separately verified): {json.dumps(ctx['cloud_buckets_passive'])}
+- Public GitHub repositories matching the company/domain name (manual-review leads only — not inspected for actual secrets, just surfaced as candidates worth a human look): {json.dumps(ctx['github_repos'])}
+- Exposed CI/CD or Docker/Kubernetes config files found on live hosts (each is a confirmed accessible file — treat as a real finding, especially if it might contain credentials or infra details): {json.dumps(ctx['exposed_cicd_k8s_files'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -156,7 +165,14 @@ payload-based scan (not just a name/value pattern flag) — treat it as strong s
 still note it should be manually confirmed before final reporting. An exposed source map that
 recovers original source code is itself an information-disclosure finding worth listing (at
 least low/medium) even before considering what's inside it — recovered secrets on top of that
-push it higher.
+push it higher. A cloud bucket marked "PUBLIC - listable" is a serious, confirmed finding
+(high, or critical if it looks like it holds backups/user data/credentials); one marked
+"exists, access denied" only confirms the name is real and is informational at most. GitHub
+repos are unconfirmed manual-review leads, not findings — do not assign them a severity or
+call them vulnerabilities, just list them as worth a human look. Exposed CI/CD/Docker/K8s
+config files are confirmed accessible files; rate them based on what they'd likely contain
+(a docker-compose.yml or CI workflow can leak credentials/infra details, so medium/high is
+reasonable even without inspecting the exact contents shown).
 
 TASK:
 Produce a structured attack-surface assessment. Respond with ONLY valid JSON, no markdown
@@ -314,6 +330,25 @@ def render_html(domain, report, ctx):
           <td>{html.escape(str(detail))[:200]}</td>
         </tr>"""
 
+    bucket_rows = ""
+    for b in ctx.get("cloud_buckets_active", []) + ctx.get("cloud_buckets_passive", []):
+        bucket_rows += f"""<tr>
+          <td>{html.escape(b.get('provider',''))}</td>
+          <td><code>{html.escape(b.get('bucket',''))}</code></td>
+          <td>{html.escape(b.get('status',''))}</td>
+        </tr>"""
+
+    github_rows = "".join(
+        f"<tr><td><a href='{html.escape(r.get('url',''))}' style='color:#38bdf8;'>{html.escape(r.get('name',''))}</a></td>"
+        f"<td>{r.get('stars','')}</td><td>{html.escape(r.get('description') or '')}</td></tr>"
+        for r in ctx.get("github_repos", [])
+    )
+
+    cicd_rows = "".join(
+        f"<tr><td><code>{html.escape(c.get('url',''))}</code></td><td>{c.get('length','')}</td></tr>"
+        for c in ctx.get("exposed_cicd_k8s_files", [])
+    )
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -411,6 +446,24 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>Severity</b></td><td><b>Category</b></td><td><b>Host</b></td><td><b>Detail</b></td></tr>
     {misconfig_rows or "<tr><td colspan='4'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Cloud Storage Exposure (S3 / Azure)</div>
+  <table>
+    <tr><td><b>Provider</b></td><td><b>Bucket</b></td><td><b>Status</b></td></tr>
+    {bucket_rows or "<tr><td colspan='3'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Related GitHub Repositories (manual review leads)</div>
+  <table>
+    <tr><td><b>Repo</b></td><td><b>★</b></td><td><b>Description</b></td></tr>
+    {github_rows or "<tr><td colspan='3'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Exposed CI/CD & Docker/Kubernetes Configs</div>
+  <table>
+    <tr><td><b>URL</b></td><td><b>Size (bytes)</b></td></tr>
+    {cicd_rows or "<tr><td colspan='2'>None found.</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
