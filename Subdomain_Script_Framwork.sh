@@ -28,6 +28,7 @@ EXTERNAL_TOOLS=(
   "sublist3r:no"      "gobuster:no"      "dnsx:no"           "alterx:no"
   "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
   "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
+  "ffuf:no"
 )
 PYTHON_PACKAGES=("requests")
 
@@ -93,6 +94,8 @@ check_dependencies() {
   echo -e "${dim}  go install github.com/projectdiscovery/alterx/cmd/alterx@latest${reset}"
   echo -e "${dim}  go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest${reset}"
   echo -e "${dim}  go install github.com/hahwul/dalfox/v2@latest${reset}"
+  echo -e "${dim}  go install github.com/ffuf/ffuf/v2@latest${reset}"
+  echo -e "${dim}  # ffuf needs a wordlist too: sudo apt install seclists  (or clone github.com/danielmiessler/SecLists)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
   echo -e "${dim}  go install github.com/lc/gau/v2/cmd/gau@latest${reset}"
   echo -e "${dim}  pip install requests --break-system-packages${reset}"
@@ -118,12 +121,13 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve probe sensitive_files wordpress api_extraction cors_headers misconfig urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps ai_report)
+STEP_KEYS=(subdomains permutation resolve probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
   "DNS Resolution Check"
   "Probe Alive Hosts"
+  "Content Discovery (ffuf)"
   "Sensitive File Exposure Check"
   "WordPress Detection + Vuln Scan"
   "API Endpoint Extraction (Swagger/GraphQL)"
@@ -317,6 +321,51 @@ step_probe() {
   fi
   cd ..
   echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
+}
+
+step_content_discovery() {
+  mkdir -p content_discovery && cd content_discovery || return 1
+
+  if ! check_tool ffuf; then
+    cd ..
+    return 0
+  fi
+  if [[ ! -s ../live/httpx_live.txt ]]; then
+    echo -e "${yellow}  no live hosts to fuzz — skipping${reset}"
+    cd ..
+    return 0
+  fi
+
+  local wordlist=""
+  for candidate in \
+    /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt \
+    /usr/share/seclists/Discovery/Web-Content/common.txt \
+    /usr/share/wordlists/dirb/common.txt
+  do
+    if [[ -f "$candidate" ]]; then wordlist="$candidate"; break; fi
+  done
+  if [[ -z "$wordlist" ]]; then
+    echo -e "${yellow}  no content-discovery wordlist found (checked SecLists/dirb paths) — install seclists or skip${reset}"
+    cd ..
+    return 0
+  fi
+
+  local hosts_total hosts_done=0
+  hosts_total=$(wc -l < ../live/httpx_live.txt)
+  while read -r line; do
+    [[ -z "$line" ]] && continue
+    local host outfile
+    host=$(echo "$line" | awk '{print $1}')
+    hosts_done=$((hosts_done+1))
+    outfile="ffuf_$(echo "$host" | sed 's/[^a-zA-Z0-9]/_/g').json"
+    printf "\r${cyan}⠋${reset} Content discovery  ${green}%d/%d hosts${reset}   " "$hosts_done" "$hosts_total"
+    ffuf -u "${host}/FUZZ" -w "$wordlist" -mc 200,201,204,301,302,307,401,403 \
+         -ac -t "$THREADS" -rate "$RATE_LIMIT" -of json -o "$outfile" -s 2>/dev/null
+  done < ../live/httpx_live.txt
+  echo ""
+
+  python3 ../merge_ffuf_results.py
+  cd ..
 }
 
 step_sensitive_files() {
@@ -619,9 +668,10 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,urls,params,nuclei,takeover,js,wordpress,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,content_discovery,urls,params,nuclei,takeover,js,wordpress,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/merge_ffuf_results.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/wordpress_scan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
@@ -645,7 +695,8 @@ fi
 run_step subdomains      step_subdomains
 run_step permutation     step_permutation
 run_step resolve         step_resolve
-run_step probe           step_probe
+run_step probe            step_probe
+run_step content_discovery step_content_discovery
 run_step sensitive_files step_sensitive_files
 run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction

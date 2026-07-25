@@ -47,6 +47,7 @@ def build_context(domain):
     cors_findings = read_json("report/cors_headers.json", {}) or {}
     misconfig_findings = read_json("report/misconfig.json", {}) or {}
     cloud_findings = read_json("report/cloud_exposure.json", {}) or {}
+    content_discovery = read_json("report/content_discovery.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -85,6 +86,7 @@ def build_context(domain):
         "cloud_buckets_passive": cloud_findings.get("buckets_found_passive", []),
         "github_repos": cloud_findings.get("github_repos", [])[:10],
         "exposed_cicd_k8s_files": cloud_findings.get("exposed_cicd_k8s_files", [])[:60],
+        "content_discovery": content_discovery.get("findings", [])[:150],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -136,6 +138,7 @@ RAW DATA:
 - Cloud storage bucket references found passively in the app's own collected URLs/JS (confirmed real usage, existence not separately verified): {json.dumps(ctx['cloud_buckets_passive'])}
 - Public GitHub repositories matching the company/domain name (manual-review leads only — not inspected for actual secrets, just surfaced as candidates worth a human look): {json.dumps(ctx['github_repos'])}
 - Exposed CI/CD or Docker/Kubernetes config files found on live hosts (each is a confirmed accessible file — treat as a real finding, especially if it might contain credentials or infra details): {json.dumps(ctx['exposed_cicd_k8s_files'])}
+- Content discovery results (ffuf directory/file brute-force with auto-calibration against soft-404s — each entry is a confirmed accessible path not found through any other passive method; look especially for admin/internal/debug/backup-sounding paths and unusual status codes like 401/403 that hint at something worth auth-bypass testing): {json.dumps(ctx['content_discovery'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -349,6 +352,11 @@ def render_html(domain, report, ctx):
         for c in ctx.get("exposed_cicd_k8s_files", [])
     )
 
+    content_rows = "".join(
+        f"<tr><td>{d.get('status','')}</td><td><code>{html.escape(d.get('url') or '')}</code></td><td>{d.get('length','')}</td></tr>"
+        for d in ctx.get("content_discovery", [])
+    )
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -464,6 +472,12 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>URL</b></td><td><b>Size (bytes)</b></td></tr>
     {cicd_rows or "<tr><td colspan='2'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Content Discovery (ffuf)</div>
+  <table>
+    <tr><td><b>Status</b></td><td><b>URL</b></td><td><b>Size</b></td></tr>
+    {content_rows or "<tr><td colspan='3'>None found (or ffuf not installed).</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
