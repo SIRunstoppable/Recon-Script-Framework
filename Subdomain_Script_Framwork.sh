@@ -28,7 +28,7 @@ EXTERNAL_TOOLS=(
   "sublist3r:no"      "gobuster:no"      "dnsx:no"           "alterx:no"
   "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
   "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
-  "ffuf:no"
+  "ffuf:no"           "subenum:no"       "assetfinder:no"    "dirsearch:no"
 )
 PYTHON_PACKAGES=("requests")
 
@@ -96,6 +96,9 @@ check_dependencies() {
   echo -e "${dim}  go install github.com/hahwul/dalfox/v2@latest${reset}"
   echo -e "${dim}  go install github.com/ffuf/ffuf/v2@latest${reset}"
   echo -e "${dim}  # ffuf needs a wordlist too: sudo apt install seclists  (or clone github.com/danielmiessler/SecLists)${reset}"
+  echo -e "${dim}  git clone https://github.com/bing0o/SubEnum.git && cd SubEnum && ./setup.sh${reset}"
+  echo -e "${dim}  go install github.com/tomnomnom/assetfinder@latest${reset}"
+  echo -e "${dim}  pip install dirsearch  (or git clone github.com/maurosoria/dirsearch)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
   echo -e "${dim}  go install github.com/lc/gau/v2/cmd/gau@latest${reset}"
   echo -e "${dim}  pip install requests --break-system-packages${reset}"
@@ -262,6 +265,12 @@ step_subdomains() {
   check_tool sublist3r && run_with_progress "sublist3r" "sublist3r.txt" -- sublist3r -d "$domain" -o sublist3r.txt
   check_tool gobuster  && run_with_progress "gobuster"  "gobuster.txt"  -- \
     gobuster dns -d "$domain" -r /etc/resolv.conf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --wildcard -q -t "$THREADS" -o gobuster.txt
+  # SubEnum wraps Findomain+SubFinder+Amass+AssetFinder+crt.sh+wayback — some overlap
+  # with the tools above is expected and harmless (everything gets deduped below).
+  check_tool subenum     && run_with_progress "subenum"     "subenum.txt"     -- \
+    bash -c "subenum -d '$domain' -s > subenum.txt"
+  check_tool assetfinder && run_with_progress "assetfinder" "assetfinder.txt" -- \
+    bash -c "assetfinder --subs-only '$domain' > assetfinder.txt"
 
   cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
   cd ..
@@ -326,12 +335,17 @@ step_probe() {
 step_content_discovery() {
   mkdir -p content_discovery && cd content_discovery || return 1
 
-  if ! check_tool ffuf; then
+  if [[ ! -s ../live/httpx_live.txt ]]; then
+    echo -e "${yellow}  no live hosts to fuzz — skipping${reset}"
     cd ..
     return 0
   fi
-  if [[ ! -s ../live/httpx_live.txt ]]; then
-    echo -e "${yellow}  no live hosts to fuzz — skipping${reset}"
+
+  local have_ffuf=0 have_dirsearch=0
+  check_tool ffuf && have_ffuf=1
+  check_tool dirsearch && have_dirsearch=1
+
+  if [[ $have_ffuf -eq 0 && $have_dirsearch -eq 0 ]]; then
     cd ..
     return 0
   fi
@@ -344,23 +358,29 @@ step_content_discovery() {
   do
     if [[ -f "$candidate" ]]; then wordlist="$candidate"; break; fi
   done
-  if [[ -z "$wordlist" ]]; then
-    echo -e "${yellow}  no content-discovery wordlist found (checked SecLists/dirb paths) — install seclists or skip${reset}"
-    cd ..
-    return 0
+  if [[ $have_ffuf -eq 1 && -z "$wordlist" ]]; then
+    echo -e "${yellow}  no content-discovery wordlist found for ffuf (checked SecLists/dirb paths) — ffuf pass will be skipped${reset}"
+    have_ffuf=0
   fi
 
   local hosts_total hosts_done=0
   hosts_total=$(wc -l < ../live/httpx_live.txt)
   while read -r line; do
     [[ -z "$line" ]] && continue
-    local host outfile
+    local host safe_name
     host=$(echo "$line" | awk '{print $1}')
+    safe_name=$(echo "$host" | sed 's/[^a-zA-Z0-9]/_/g')
     hosts_done=$((hosts_done+1))
-    outfile="ffuf_$(echo "$host" | sed 's/[^a-zA-Z0-9]/_/g').json"
     printf "\r${cyan}⠋${reset} Content discovery  ${green}%d/%d hosts${reset}   " "$hosts_done" "$hosts_total"
-    ffuf -u "${host}/FUZZ" -w "$wordlist" -mc 200,201,204,301,302,307,401,403 \
-         -ac -t "$THREADS" -rate "$RATE_LIMIT" -of json -o "$outfile" -s 2>/dev/null
+
+    if [[ $have_ffuf -eq 1 ]]; then
+      ffuf -u "${host}/FUZZ" -w "$wordlist" -mc 200,201,204,301,302,307,401,403 \
+           -ac -t "$THREADS" -rate "$RATE_LIMIT" -of json -o "ffuf_${safe_name}.json" -s 2>/dev/null
+    fi
+    if [[ $have_dirsearch -eq 1 ]]; then
+      # --format=plain is stable across dirsearch versions/forks, unlike its JSON schema.
+      dirsearch -u "$host" -o "dirsearch_${safe_name}.txt" --format=plain -q --random-agent 2>/dev/null
+    fi
   done < ../live/httpx_live.txt
   echo ""
 

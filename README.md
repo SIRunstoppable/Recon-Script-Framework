@@ -35,6 +35,8 @@ missing.
 | Tool | Used by | Install |
 |---|---|---|
 | `subfinder` | Subdomain Enumeration | `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest` |
+| `subenum` | Subdomain Enumeration (wraps Findomain+SubFinder+Amass+AssetFinder+crt.sh+wayback) | `git clone https://github.com/bing0o/SubEnum.git && cd SubEnum && ./setup.sh` |
+| `assetfinder` | Subdomain Enumeration | `go install github.com/tomnomnom/assetfinder@latest` |
 | `amass` | Subdomain Enumeration | see github.com/owasp-amass/amass |
 | `sublist3r` | Subdomain Enumeration | `pip install sublist3r` |
 | `gobuster` | Subdomain Enumeration | `go install github.com/OJ/gobuster/v3@latest` |
@@ -49,6 +51,7 @@ missing.
 | `subjack` | Subdomain Takeover | `go install github.com/haccer/subjack@latest` |
 | `dalfox` | XSS Scan | `go install github.com/hahwul/dalfox/v2@latest` |
 | `ffuf` | Content Discovery | `go install github.com/ffuf/ffuf/v2@latest` — also needs a wordlist, e.g. `apt install seclists` |
+| `dirsearch` | Content Discovery | `pip install dirsearch` (or `git clone github.com/maurosoria/dirsearch`) |
 
 ### 1.3 Scope — `scope.txt`
 ```bash
@@ -140,11 +143,11 @@ report because `GEMINI_API_KEY` wasn't set yet) will simply retry next time.
 
 | # | Step | What it does | Depends on |
 |---|---|---|---|
-| 1 | **Subdomain Enumeration** | Runs subfinder/amass/sublist3r/gobuster, merges + dedupes into `all_subdomains.txt` | target domain (scope-checked first, see §1.3) |
+| 1 | **Subdomain Enumeration** | Runs subfinder/amass/sublist3r/gobuster/**SubEnum**/**assetfinder**, merges + dedupes into `all_subdomains.txt`. (SubEnum itself wraps several of the same tools plus crt.sh/wayback — overlap is expected and harmless, everything gets deduped.) | target domain (scope-checked first, see §1.3) |
 | 2 | **Subdomain Permutation** | `alterx` generates candidate variations (`dev-api.`, `staging.`...) from step 1's results; `dnsx` keeps only ones that actually resolve; merges back into `all_subdomains.txt` | step 1 |
 | 3 | **DNS Resolution Check** | `dnsx` filters the full subdomain list down to `resolved_subdomains.txt` so later steps don't waste time probing dead hosts. (Deliberately **not** used for the takeover check — dangling/non-resolving CNAMEs are exactly what that step looks for.) | steps 1–2 |
 | 4 | **Probe Alive Hosts** | `httpx` checks which resolved hosts are actually serving HTTP(S), grabs title/tech/status/IP | step 3 |
-| 5 | **Content Discovery** | `ffuf` directory/file brute-force against every live host with a wordlist, using ffuf's built-in auto-calibration (`-ac`) to filter soft-404/custom-not-found pages. This is the main lever for finding endpoints/panels that no other step would ever guess. | step 4 |
+| 5 | **Content Discovery** | `ffuf` + `dirsearch` directory/file brute-force against every live host with a wordlist (ffuf) and dirsearch's bundled lists — results from both are merged and deduped, with a path found by both tools flagged as a stronger signal. Uses ffuf's built-in auto-calibration (`-ac`) to filter soft-404/custom-not-found pages. This is the main lever for finding endpoints/panels that no other step would ever guess. | step 4 |
 | 6 | **Sensitive File Exposure Check** | Probes ~40 *known* paths per live host (`.git/HEAD`, `.env`, backups, cloud creds, swagger, actuator...) — a curated list rather than a wordlist brute-force. Uses a random-path **baseline request** first so custom "soft-404" pages don't produce false positives. | step 4 |
 | 7 | **WordPress Detection + Vuln Scan** | Confirms WordPress via tech-detect + active checks (`wp-login.php`, `wp-json`), reads version from `readme.html`, enumerates usernames via the public `/wp-json/wp/v2/users` endpoint, checks `xmlrpc.php` reachability, then runs nuclei's WordPress core/plugin/theme CVE templates against confirmed hosts only | step 4 |
 | 8 | **API Endpoint Extraction** | Probes for exposed OpenAPI/Swagger specs (parses `paths` to list every documented endpoint+method) and GraphQL introspection (lists every query/mutation if introspection is enabled) | step 4 |
