@@ -54,7 +54,7 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
-from rate_limiter import throttle, MAX_WORKERS
+from rate_limiter import get, MAX_WORKERS
 
 TIMEOUT = 8
 
@@ -89,8 +89,7 @@ def bucket_name_candidates(domain):
 def check_s3_bucket(name):
     for url in (f"https://{name}.s3.amazonaws.com", f"https://s3.amazonaws.com/{name}"):
         try:
-            throttle()
-            r = requests.get(url, timeout=TIMEOUT, verify=False)
+            r = get(url, timeout=TIMEOUT, verify=False)
         except Exception:
             continue
         # Real S3 always sets this Server header — required so a generic 403 from a
@@ -108,8 +107,7 @@ def check_s3_bucket(name):
 def check_azure_blob(name):
     url = f"https://{name}.blob.core.windows.net/?comp=list"
     try:
-        throttle()
-        r = requests.get(url, timeout=TIMEOUT, verify=False)
+        r = get(url, timeout=TIMEOUT, verify=False)
     except Exception:
         return None
     # Real Azure Blob Storage always sets this Server header — same false-positive
@@ -171,7 +169,7 @@ def passive_cloud_refs():
 
 def search_github_repos(query):
     try:
-        r = requests.get(
+        r = get(
             "https://api.github.com/search/repositories",
             params={"q": query, "per_page": 10, "sort": "updated"},
             headers={"Accept": "application/vnd.github+json"},
@@ -211,8 +209,7 @@ def read_hosts(path="live/httpx_live.txt"):
 def get_baseline(host):
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=14))
     try:
-        throttle()
-        r = requests.get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
+        r = get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
         return r.status_code, len(r.content)
     except Exception:
         return None, None
@@ -223,8 +220,7 @@ def check_cicd_k8s(host):
     base_status, base_len = get_baseline(host)
     for path in CICD_K8S_PATHS:
         try:
-            throttle()
-            r = requests.get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            r = get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue
         if r.status_code != 200:

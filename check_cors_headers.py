@@ -52,8 +52,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import get, MAX_WORKERS
+
 TIMEOUT = 8
-MAX_WORKERS = 15
 
 SECURITY_HEADERS = [
     "Content-Security-Policy",
@@ -95,7 +96,7 @@ def test_cors(host):
     findings = []
     for origin, test_name in build_origin_tests(host):
         try:
-            r = requests.get(host, headers={"Origin": origin}, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            r = get(host, headers={"Origin": origin}, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue
         acao = r.headers.get("Access-Control-Allow-Origin")
@@ -129,7 +130,7 @@ def test_cors(host):
 
 def check_security_headers(host):
     try:
-        r = requests.get(host, timeout=TIMEOUT, verify=False, allow_redirects=True)
+        r = get(host, timeout=TIMEOUT, verify=False, allow_redirects=True)
     except Exception:
         return None
     missing = [h for h in SECURITY_HEADERS if h not in r.headers]

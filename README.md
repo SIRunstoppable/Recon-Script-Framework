@@ -81,17 +81,25 @@ Get a key at https://aistudio.google.com/apikey. The model used is set via
 `GEMINI_MODEL` in `.env` (defaults to `gemini-2.0-flash` — check
 https://ai.google.dev/gemini-api/docs/models for current names).
 
-### 1.5 Rate limiting / concurrency
+### 1.5 Rate limiting / concurrency / 429 backoff
 Every active-scanning step — external tools and the Python helper scripts
-alike — shares two knobs, settable in `.env`:
+alike — shares these knobs, settable in `.env`:
 ```
 RECON_RATE_LIMIT=10      # requests/sec cap, shared across ALL threads in a step (0 = unlimited)
 RECON_MAX_WORKERS=15     # thread/worker count
+RECON_MAX_RETRIES=3      # retries on a 429/503 response before giving up
 ```
 This is a *shared* limiter, not per-thread — raising `RECON_MAX_WORKERS` doesn't
 let a step exceed `RECON_RATE_LIMIT` in aggregate against the target. Lower
 `RECON_RATE_LIMIT` (e.g. `3`) if the target has a sensitive WAF, or raise both
 if you have explicit permission for more aggressive testing.
+
+On top of the outbound rate cap, every Python helper script also **automatically
+backs off when the target itself responds with 429 or 503** — it honors a
+`Retry-After` header if the server sends one, otherwise backs off exponentially
+(2s → 4s → 8s, capped at 30s per retry) before giving up and returning the
+last response as-is. This is handled centrally in `rate_limiter.py`'s `get()`/
+`post()` wrappers, so no individual script has any special-case logic for it.
 
 ### 1.6 Files that must sit next to `recon-framework.sh`
 The shell script copies these into each run's output folder automatically —

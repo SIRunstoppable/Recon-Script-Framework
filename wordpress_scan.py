@@ -39,8 +39,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import get, MAX_WORKERS
+
 TIMEOUT = 8
-MAX_WORKERS = 15
 
 
 def read_hosts(path="live/httpx_live.txt"):
@@ -65,13 +66,13 @@ def looks_like_wp_from_techline(line):
 def confirm_wp(host):
     indicators = []
     try:
-        r = requests.get(f"{host}/wp-login.php", timeout=TIMEOUT, verify=False, allow_redirects=True)
+        r = get(f"{host}/wp-login.php", timeout=TIMEOUT, verify=False, allow_redirects=True)
         if r.status_code in (200, 403) and ("wp-login" in r.text.lower() or "wordpress" in r.text.lower()):
             indicators.append("wp-login.php")
     except Exception:
         pass
     try:
-        r = requests.get(f"{host}/wp-json/", timeout=TIMEOUT, verify=False)
+        r = get(f"{host}/wp-json/", timeout=TIMEOUT, verify=False)
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -86,7 +87,7 @@ def confirm_wp(host):
 
 def get_wp_version(host):
     try:
-        r = requests.get(f"{host}/readme.html", timeout=TIMEOUT, verify=False)
+        r = get(f"{host}/readme.html", timeout=TIMEOUT, verify=False)
         if r.status_code == 200:
             m = re.search(r"[Vv]ersion\s+([\d.]+)", r.text)
             if m:
@@ -99,7 +100,7 @@ def get_wp_version(host):
 def enum_users(host):
     users = []
     try:
-        r = requests.get(f"{host}/wp-json/wp/v2/users", timeout=TIMEOUT, verify=False)
+        r = get(f"{host}/wp-json/wp/v2/users", timeout=TIMEOUT, verify=False)
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list):
@@ -113,7 +114,7 @@ def enum_users(host):
 
 def check_xmlrpc(host):
     try:
-        r = requests.get(f"{host}/xmlrpc.php", timeout=TIMEOUT, verify=False)
+        r = get(f"{host}/xmlrpc.php", timeout=TIMEOUT, verify=False)
         return r.status_code == 200 and "xml-rpc" in r.text.lower()
     except Exception:
         return False

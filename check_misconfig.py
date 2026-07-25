@@ -49,8 +49,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import get, MAX_WORKERS
+
 TIMEOUT = 8
-MAX_WORKERS = 15
 
 DIRECTORY_LISTING_PATHS = ["/", "/images/", "/uploads/", "/assets/", "/backup/", "/files/", "/static/", "/media/"]
 
@@ -176,7 +177,7 @@ def check_directory_listing(host):
     findings = []
     for path in DIRECTORY_LISTING_PATHS:
         try:
-            r = requests.get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            r = get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue
         if r.status_code != 200:
@@ -191,14 +192,14 @@ def check_health_endpoints(host):
     findings = []
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
     try:
-        base = requests.get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
+        base = get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
         base_status, base_len = base.status_code, len(base.content)
     except Exception:
         base_status, base_len = None, None
 
     for path in HEALTH_PATHS:
         try:
-            r = requests.get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            r = get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue
         if r.status_code != 200:
@@ -213,7 +214,7 @@ def check_health_endpoints(host):
 def scan_host(host):
     findings = []
     try:
-        r = requests.get(host, timeout=TIMEOUT, verify=False, allow_redirects=True)
+        r = get(host, timeout=TIMEOUT, verify=False, allow_redirects=True)
         findings.extend(check_headers(host, r))
         findings.extend(check_cookies(r))
         findings.extend(check_debug(r))

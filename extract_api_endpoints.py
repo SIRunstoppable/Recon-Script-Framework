@@ -39,8 +39,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import get, post, MAX_WORKERS
+
 TIMEOUT = 8
-MAX_WORKERS = 15
 MAX_ENDPOINTS_PER_SPEC = 500
 MAX_OPS_PER_SCHEMA = 300
 
@@ -93,7 +94,7 @@ def try_parse_openapi(host):
     for path in API_DOC_PATHS:
         url = host + path
         try:
-            r = requests.get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
+            r = get(url, timeout=TIMEOUT, verify=False, allow_redirects=True)
         except Exception:
             continue
         if r.status_code != 200:
@@ -133,7 +134,7 @@ def try_graphql_introspection(host):
     for path in GRAPHQL_PATHS:
         url = host + path
         try:
-            r = requests.post(url, json={"query": INTROSPECTION_QUERY}, timeout=TIMEOUT, verify=False)
+            r = post(url, json={"query": INTROSPECTION_QUERY}, timeout=TIMEOUT, verify=False)
         except Exception:
             continue
         if r.status_code != 200:

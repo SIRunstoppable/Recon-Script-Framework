@@ -34,8 +34,9 @@ except ImportError:
     print("    pip install requests --break-system-packages")
     raise SystemExit(0)
 
+from rate_limiter import get, MAX_WORKERS
+
 TIMEOUT = 6
-MAX_WORKERS = 20
 
 SENSITIVE_PATHS = [
     # VCS
@@ -78,7 +79,7 @@ def read_hosts(path="live/httpx_live.txt"):
 def get_baseline(host):
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=14))
     try:
-        r = requests.get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
+        r = get(f"{host}/__nonexistent_{rand}__", timeout=TIMEOUT, verify=False, allow_redirects=False)
         return r.status_code, len(r.content)
     except Exception:
         return None, None
@@ -89,7 +90,7 @@ def check_host(host):
     base_status, base_len = get_baseline(host)
     for path in SENSITIVE_PATHS:
         try:
-            r = requests.get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
+            r = get(host + path, timeout=TIMEOUT, verify=False, allow_redirects=False)
         except Exception:
             continue
         status = r.status_code
