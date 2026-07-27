@@ -48,6 +48,7 @@ def build_context(domain):
     misconfig_findings = read_json("report/misconfig.json", {}) or {}
     cloud_findings = read_json("report/cloud_exposure.json", {}) or {}
     content_discovery = read_json("report/content_discovery.json", {}) or {}
+    ip_bypass = read_json("report/ip_bypass.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -87,6 +88,7 @@ def build_context(domain):
         "github_repos": cloud_findings.get("github_repos", [])[:10],
         "exposed_cicd_k8s_files": cloud_findings.get("exposed_cicd_k8s_files", [])[:60],
         "content_discovery": content_discovery.get("findings", [])[:150],
+        "ip_bypass_findings": ip_bypass.get("findings", [])[:60],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -139,6 +141,7 @@ RAW DATA:
 - Public GitHub repositories matching the company/domain name (manual-review leads only — not inspected for actual secrets, just surfaced as candidates worth a human look): {json.dumps(ctx['github_repos'])}
 - Exposed CI/CD or Docker/Kubernetes config files found on live hosts (each is a confirmed accessible file — treat as a real finding, especially if it might contain credentials or infra details): {json.dumps(ctx['exposed_cicd_k8s_files'])}
 - Content discovery results (ffuf directory/file brute-force with auto-calibration against soft-404s — each entry is a confirmed accessible path not found through any other passive method; look especially for admin/internal/debug/backup-sounding paths and unusual status codes like 401/403 that hint at something worth auth-bypass testing): {json.dumps(ctx['content_discovery'])}
+- CONFIRMED IP-restriction bypasses (a path that returned 401/403 normally but returned a different status when a spoofed IP header like X-Forwarded-For was sent — this is a real, confirmed access-control vulnerability, not a lead; rate high/critical depending on what the bypassed path appears to expose): {json.dumps(ctx['ip_bypass_findings'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -357,6 +360,12 @@ def render_html(domain, report, ctx):
         for d in ctx.get("content_discovery", [])
     )
 
+    ip_bypass_rows = "".join(
+        f"<tr><td><code>{html.escape(b.get('url',''))}</code></td><td>{b.get('baseline_status','')}</td><td>{b.get('bypassed_status','')}</td>"
+        f"<td><code>{html.escape(b.get('bypass_header',''))}: {html.escape(b.get('bypass_value',''))}</code></td></tr>"
+        for b in ctx.get("ip_bypass_findings", [])
+    )
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -478,6 +487,13 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>Status</b></td><td><b>URL</b></td><td><b>Size</b></td></tr>
     {content_rows or "<tr><td colspan='3'>None found (or ffuf not installed).</td></tr>"}
+  </table>
+
+  <div class="section-title">Confirmed IP-Restriction Bypasses</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Paths that were 401/403 normally but returned a different status with a spoofed IP header (CWE-290).</p>
+  <table>
+    <tr><td><b>URL</b></td><td><b>Baseline</b></td><td><b>Bypassed</b></td><td><b>Via Header</b></td></tr>
+    {ip_bypass_rows or "<tr><td colspan='4'>None found.</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>

@@ -109,6 +109,23 @@ if [[ "$1" == "--check-deps" || "$1" == "-check-deps" ]]; then
   exit 0
 fi
 
+# ---------- CLI flags (for automation / the web dashboard) ----------
+# --domain <domain>   skip the interactive prompt
+# --yes, -y            auto-confirm scope.txt creation AND resume-previous-run prompts
+# --no-resume           always start a fresh run even if a previous one exists
+CLI_DOMAIN=""
+CLI_AUTO_YES=0
+CLI_NO_RESUME=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --domain) CLI_DOMAIN="$2"; shift 2 ;;
+    --domain=*) CLI_DOMAIN="${1#*=}"; shift ;;
+    --yes|-y) CLI_AUTO_YES=1; shift ;;
+    --no-resume) CLI_NO_RESUME=1; shift ;;
+    *) shift ;;
+  esac
+done
+
 # ---------- Config ----------
 # GEMINI_API_KEY comes from .env (see .env.example)
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.0-flash}"   # check https://ai.google.dev/gemini-api/docs/models for current names
@@ -124,7 +141,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps ai_report)
+STEP_KEYS=(subdomains permutation resolve probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
@@ -136,6 +153,7 @@ STEP_LABELS=(
   "API Endpoint Extraction (Swagger/GraphQL)"
   "CORS + Security Headers Check"
   "Security Misconfiguration Check"
+  "IP-Restriction Bypass Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
   "Open Redirect / SSRF / IDOR Flagging"
@@ -438,6 +456,15 @@ step_misconfig() {
   python3 check_misconfig.py
 }
 
+step_ip_bypass() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping IP bypass check${reset}"
+    return 0
+  fi
+  python3 check_ip_bypass.py
+}
+
 step_urls() {
   mkdir -p urls && cd urls || return 1
   > raw_urls.txt
@@ -603,7 +630,13 @@ check_scope() {
   if [[ ! -f "$scope_file" ]]; then
     echo -e "${yellow}${bold}No scope.txt found next to this script.${reset}"
     echo -e "${dim}scope.txt records which domains you're authorized to test, and gets checked automatically on every future run.${reset}"
-    read -p "Do you have written authorization to test '$domain'? Confirm to create scope.txt [y/N] " confirm
+    local confirm
+    if [[ "$CLI_AUTO_YES" -eq 1 ]]; then
+      confirm="y"
+      echo -e "${dim}--yes passed: treating '$domain' as authorized and creating scope.txt automatically.${reset}"
+    else
+      read -p "Do you have written authorization to test '$domain'? Confirm to create scope.txt [y/N] " confirm
+    fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
       echo -e "${red}Aborting — no scope file and authorization not confirmed.${reset}"
       exit 1
@@ -661,7 +694,12 @@ check_scope() {
 ###############################################################################
 banner
 
-read -p "🔎 Enter target domain (must be in your bug bounty scope): " domain
+if [[ -n "$CLI_DOMAIN" ]]; then
+  domain="$CLI_DOMAIN"
+  echo -e "🔎 Target domain (from --domain): ${bold}${domain}${reset}"
+else
+  read -p "🔎 Enter target domain (must be in your bug bounty scope): " domain
+fi
 if [[ -z "$domain" ]]; then
   echo -e "${red}No domain given, exiting.${reset}"; exit 1
 fi
@@ -672,11 +710,16 @@ check_scope "$domain"
 mapfile -t existing_dirs < <(ls -d recon-"${domain}"-* 2>/dev/null | sort -r)
 
 WORKDIR=""
-if [[ ${#existing_dirs[@]} -gt 0 ]]; then
+if [[ ${#existing_dirs[@]} -gt 0 && "$CLI_NO_RESUME" -ne 1 ]]; then
   latest="${existing_dirs[0]}"
   echo -e "${yellow}Found a previous run for this domain: ${bold}${latest}${reset}"
-  read -p "Resume it? [Y/n] " resume_choice
-  resume_choice="${resume_choice:-Y}"
+  if [[ "$CLI_AUTO_YES" -eq 1 ]]; then
+    resume_choice="Y"
+    echo -e "${dim}--yes passed: resuming automatically.${reset}"
+  else
+    read -p "Resume it? [Y/n] " resume_choice
+    resume_choice="${resume_choice:-Y}"
+  fi
   if [[ "$resume_choice" =~ ^[Yy]$ ]]; then
     WORKDIR="$latest"
     echo -e "${green}Resuming: $WORKDIR${reset}"
@@ -698,6 +741,7 @@ cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cloud_exposure.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_source_maps.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
@@ -722,6 +766,7 @@ run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction
 run_step cors_headers    step_cors_headers
 run_step misconfig       step_misconfig
+run_step ip_bypass       step_ip_bypass
 run_step urls            step_urls
 run_step params          step_params
 run_step param_flagging  step_param_flagging

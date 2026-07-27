@@ -1,1 +1,2 @@
 requests>=2.31.0
+flask>=3.0.0   # only needed for webui.py (the browser dashboard) — not required for CLI-only use
