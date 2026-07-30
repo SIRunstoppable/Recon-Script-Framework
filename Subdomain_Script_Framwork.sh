@@ -141,11 +141,12 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps ai_report)
+STEP_KEYS=(subdomains permutation resolve ip_export probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
   "DNS Resolution Check"
+  "IP Address Export"
   "Probe Alive Hosts"
   "Content Discovery (ffuf)"
   "Sensitive File Exposure Check"
@@ -164,6 +165,7 @@ STEP_LABELS=(
   "JavaScript File Harvest"
   "Cloud Exposure (S3/Azure/GitHub/CI-CD)"
   "Exposed Source Map Recovery"
+  "Correlation Engine"
   "AI Attack Surface Report"
 )
 TOTAL_STEPS=${#STEP_KEYS[@]}
@@ -336,6 +338,28 @@ step_resolve() {
   total=$(cat all_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
   resolved=$(cat resolved_subdomains.txt 2>/dev/null | wc -l | tr -d ' ')
   echo -e "${green}[+] Resolvable subdomains: $resolved / $total${reset}"
+}
+
+step_ip_export() {
+  mkdir -p resolve report
+  local target_list="resolved_subdomains.txt"
+  [[ -f "$target_list" ]] || target_list="all_subdomains.txt"
+  if [[ ! -s "$target_list" ]]; then
+    echo -e "${yellow}  no resolved subdomains to export IPs for — skipping${reset}"
+    return 0
+  fi
+  if check_tool dnsx; then
+    run_with_progress "dnsx-ip-export" "resolve/domain_ips_raw.txt" -- \
+      dnsx -l "$target_list" -a -resp -silent -rate-limit "$RATE_LIMIT" -t "$THREADS" -o resolve/domain_ips_raw.txt
+  else
+    echo -e "${yellow}  dnsx not found — skipping IP export${reset}"
+    return 0
+  fi
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping IP export cleanup${reset}"
+    return 0
+  fi
+  python3 export_ip_list.py
 }
 
 step_probe() {
@@ -598,6 +622,15 @@ step_source_maps() {
   python3 extract_source_maps.py
 }
 
+step_correlate() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping correlation engine${reset}"
+    return 0
+  fi
+  python3 correlate_findings.py
+}
+
 step_ai_report() {
   if [[ -z "$GEMINI_API_KEY" ]]; then
     echo -e "${red}  ⚠ GEMINI_API_KEY not set - skipping AI report.${reset}"
@@ -742,6 +775,8 @@ cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cloud_exposure.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_source_maps.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/generate_ai_report.py" "$WORKDIR/" 2>/dev/null
@@ -759,6 +794,7 @@ fi
 run_step subdomains      step_subdomains
 run_step permutation     step_permutation
 run_step resolve         step_resolve
+run_step ip_export       step_ip_export
 run_step probe            step_probe
 run_step content_discovery step_content_discovery
 run_step sensitive_files step_sensitive_files
@@ -777,6 +813,7 @@ run_step keywords        step_keywords
 run_step js              step_js
 run_step cloud_exposure  step_cloud_exposure
 run_step source_maps     step_source_maps
+run_step correlate       step_correlate
 run_step ai_report       step_ai_report
 
 echo ""

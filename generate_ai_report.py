@@ -49,6 +49,7 @@ def build_context(domain):
     cloud_findings = read_json("report/cloud_exposure.json", {}) or {}
     content_discovery = read_json("report/content_discovery.json", {}) or {}
     ip_bypass = read_json("report/ip_bypass.json", {}) or {}
+    correlations = read_json("report/correlations.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -89,6 +90,7 @@ def build_context(domain):
         "exposed_cicd_k8s_files": cloud_findings.get("exposed_cicd_k8s_files", [])[:60],
         "content_discovery": content_discovery.get("findings", [])[:150],
         "ip_bypass_findings": ip_bypass.get("findings", [])[:60],
+        "correlations": correlations.get("correlations", []),
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -115,6 +117,15 @@ def build_context(domain):
 def build_prompt(ctx):
     return f"""You are a senior application security engineer reviewing raw recon tool output
 for the authorized bug bounty target: {ctx['domain']}
+
+PRE-VERIFIED CORRELATIONS (read this first): a deterministic rule-based engine already
+cross-referenced findings across every scanning step, grouped by host, and flagged the
+compound-risk patterns below BEFORE you saw any raw data. These are not guesses — each one
+is backed by concrete evidence from two or more independent steps agreeing on the same host.
+Give these priority placement in your priority_findings output; you don't need to re-derive
+them, just incorporate them (you may still adjust severity slightly if the raw data below
+gives you reason to, but explain why if you do):
+{json.dumps(ctx['correlations'], indent=2)}
 
 RAW DATA:
 - Total subdomains found: {ctx['subdomains_total']}
@@ -366,6 +377,15 @@ def render_html(domain, report, ctx):
         for b in ctx.get("ip_bypass_findings", [])
     )
 
+    correlation_rows = ""
+    for c in ctx.get("correlations", []):
+        correlation_rows += f"""<tr>
+          <td>{sev_badge(c.get('severity','low'))}</td>
+          <td>{html.escape(c.get('name',''))}</td>
+          <td><code>{html.escape(c.get('host',''))}</code></td>
+          <td>{html.escape(c.get('explanation',''))}</td>
+        </tr>"""
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -418,6 +438,13 @@ def render_html(domain, report, ctx):
     <div class="stat"><div class="num">{stats.get('critical_findings','-')}</div><div class="label">Critical Findings</div></div>
     <div class="stat"><div class="num">{stats.get('flagged_urls','-')}</div><div class="label">Flagged URLs</div></div>
   </div>
+
+  <div class="section-title">🔗 Cross-Referenced Compound Findings</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Deterministic rule-based correlation across every step's output, grouped by host — not AI-generated, verified by two or more independent methods agreeing.</p>
+  <table>
+    <tr><td><b>Severity</b></td><td><b>Pattern</b></td><td><b>Host</b></td><td><b>Why it matters</b></td></tr>
+    {correlation_rows or "<tr><td colspan='4'>None found.</td></tr>"}
+  </table>
 
   <div class="section-title">Priority Findings</div>
   {findings_html or "<p>No priority findings surfaced from raw data.</p>"}
