@@ -47,6 +47,7 @@ WEIGHTS = {
     "js_secret_high": 3,
     "cicd_k8s_exposed": 3,
     "graphql_introspection": 2,
+    "login_page": 1,
 }
 
 
@@ -108,6 +109,7 @@ def build_host_data():
         "cors": [], "misconfig": [], "wordpress": None, "nuclei_critical": [],
         "nuclei_exposures": [], "nuclei_wordpress": [], "js_secrets": [],
         "cicd_k8s": [], "graphql": [], "openapi": [], "cloud_buckets": [],
+        "login_pages": [],
     })
 
     for f in (read_json("report/sensitive_files.json", {}) or {}).get("findings", []):
@@ -178,6 +180,11 @@ def build_host_data():
         h = normalize_host(s.get("host"))
         if h:
             host_data[h]["openapi"].append(s)
+
+    for lp in (read_json("report/login_pages.json", {}) or {}).get("login_pages", []):
+        h = normalize_host(lp.get("url"))
+        if h:
+            host_data[h]["login_pages"].append(lp)
 
     return host_data
 
@@ -276,6 +283,34 @@ def rule_cicd_plus_cloud(host, d):
     return None
 
 
+def rule_login_plus_known_usernames(host, d):
+    if d["login_pages"] and d["wordpress"] and d["wordpress"].get("enumerated_usernames"):
+        users = d["wordpress"]["enumerated_usernames"]
+        return {
+            "name": "Working login page + known usernames enumerated on the same host",
+            "severity": "high",
+            "host": host,
+            "explanation": f"A confirmed login page exists on this host, and {len(users)} real username(s) were "
+                            f"enumerated via the WordPress REST API: {', '.join(users[:10])}. This is a ready-made "
+                            "target list for credential-stuffing or brute-force testing (check rate-limiting/lockout "
+                            "policy before attempting) — far more actionable than either finding alone.",
+        }
+    return None
+
+
+def rule_login_plus_ip_bypass(host, d):
+    if d["login_pages"] and d["ip_bypass"]:
+        return {
+            "name": "Working login page on a host where IP restrictions were bypassed",
+            "severity": "high",
+            "host": host,
+            "explanation": f"{len(d['login_pages'])} login page(s) confirmed on this host, and separately an "
+                            "IP-restriction bypass was confirmed here too — worth checking whether the login flow "
+                            "itself (or something behind it) is affected by the same bypassable access control.",
+        }
+    return None
+
+
 NAMED_RULES = [
     rule_wordpress_plus_cve,
     rule_admin_panel_plus_ip_bypass,
@@ -283,6 +318,8 @@ NAMED_RULES = [
     rule_exposed_files_plus_secrets,
     rule_graphql_dangerous_mutations,
     rule_cicd_plus_cloud,
+    rule_login_plus_known_usernames,
+    rule_login_plus_ip_bypass,
 ]
 
 
@@ -300,6 +337,7 @@ def cumulative_score(d):
     score += len(d["js_secrets"]) * WEIGHTS["js_secret_high"]
     score += len(d["cicd_k8s"]) * WEIGHTS["cicd_k8s_exposed"]
     score += len(d["graphql"]) * WEIGHTS["graphql_introspection"]
+    score += len(d["login_pages"]) * WEIGHTS["login_page"]
     return score
 
 
