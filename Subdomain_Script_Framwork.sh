@@ -141,7 +141,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve ip_export probe content_discovery sensitive_files wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Subdomain Permutation (alterx)"
@@ -150,6 +150,7 @@ STEP_LABELS=(
   "Probe Alive Hosts"
   "Content Discovery (ffuf)"
   "Sensitive File Exposure Check"
+  "Login Page Discovery"
   "WordPress Detection + Vuln Scan"
   "API Endpoint Extraction (Swagger/GraphQL)"
   "CORS + Security Headers Check"
@@ -437,6 +438,15 @@ step_sensitive_files() {
     return 0
   fi
   python3 check_sensitive_files.py
+}
+
+step_login_pages() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping login page discovery${reset}"
+    return 0
+  fi
+  python3 find_login_pages.py
 }
 
 step_wordpress() {
@@ -769,6 +779,7 @@ cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/merge_ffuf_results.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/find_login_pages.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/wordpress_scan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
@@ -798,6 +809,7 @@ run_step ip_export       step_ip_export
 run_step probe            step_probe
 run_step content_discovery step_content_discovery
 run_step sensitive_files step_sensitive_files
+run_step login_pages     step_login_pages
 run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction
 run_step cors_headers    step_cors_headers
