@@ -50,6 +50,7 @@ def build_context(domain):
     content_discovery = read_json("report/content_discovery.json", {}) or {}
     ip_bypass = read_json("report/ip_bypass.json", {}) or {}
     correlations = read_json("report/correlations.json", {}) or {}
+    login_pages = read_json("report/login_pages.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -91,6 +92,7 @@ def build_context(domain):
         "content_discovery": content_discovery.get("findings", [])[:150],
         "ip_bypass_findings": ip_bypass.get("findings", [])[:60],
         "correlations": correlations.get("correlations", []),
+        "login_pages": login_pages.get("login_pages", [])[:60],
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -153,6 +155,7 @@ RAW DATA:
 - Exposed CI/CD or Docker/Kubernetes config files found on live hosts (each is a confirmed accessible file — treat as a real finding, especially if it might contain credentials or infra details): {json.dumps(ctx['exposed_cicd_k8s_files'])}
 - Content discovery results (ffuf directory/file brute-force with auto-calibration against soft-404s — each entry is a confirmed accessible path not found through any other passive method; look especially for admin/internal/debug/backup-sounding paths and unusual status codes like 401/403 that hint at something worth auth-bypass testing): {json.dumps(ctx['content_discovery'])}
 - CONFIRMED IP-restriction bypasses (a path that returned 401/403 normally but returned a different status when a spoofed IP header like X-Forwarded-For was sent — this is a real, confirmed access-control vulnerability, not a lead; rate high/critical depending on what the bypassed path appears to expose): {json.dumps(ctx['ip_bypass_findings'])}
+- Working login pages found (confirmed live, high-confidence entries have an actual <input type="password"> field verified — these are good targets for manual testing of default creds, rate-limiting/brute-force protection, and MFA bypass; not vulnerabilities on their own, just confirmed attack-surface entry points worth listing as interesting_endpoints): {json.dumps(ctx['login_pages'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -386,6 +389,11 @@ def render_html(domain, report, ctx):
           <td>{html.escape(c.get('explanation',''))}</td>
         </tr>"""
 
+    login_rows = "".join(
+        f"<tr><td><code>{html.escape(l.get('url',''))}</code></td><td>{sev_badge('high' if l.get('confidence')=='high' else 'low')}</td></tr>"
+        for l in ctx.get("login_pages", [])
+    )
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -521,6 +529,13 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>URL</b></td><td><b>Baseline</b></td><td><b>Bypassed</b></td><td><b>Via Header</b></td></tr>
     {ip_bypass_rows or "<tr><td colspan='4'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Working Login Pages</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Confirmed live — good targets for manual credential/brute-force/MFA testing.</p>
+  <table>
+    <tr><td><b>URL</b></td><td><b>Confidence</b></td></tr>
+    {login_rows or "<tr><td colspan='2'>None found.</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
