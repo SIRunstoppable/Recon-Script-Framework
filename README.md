@@ -81,6 +81,11 @@ Get a key at https://aistudio.google.com/apikey. The model used is set via
 `GEMINI_MODEL` in `.env` (defaults to `gemini-2.0-flash` — check
 https://ai.google.dev/gemini-api/docs/models for current names).
 
+Also optional: `SHODAN_API_KEY` enables the Shodan Asset Discovery step
+(get one at https://account.shodan.io/ — free tier has limited monthly
+search credits, which this step is frugal with: only 2 queries per run).
+Without it, that step just skips itself like any other missing tool.
+
 ### 1.5 Rate limiting / concurrency / 429 backoff
 Every active-scanning step — external tools and the Python helper scripts
 alike — shares these knobs, settable in `.env`:
@@ -116,6 +121,10 @@ check_cors_headers.py
 check_misconfig.py
 check_cloud_exposure.py
 check_ip_bypass.py
+check_shodan.py
+export_ip_list.py
+find_login_pages.py
+correlate_findings.py
 flag_interesting_params.py
 extract_source_maps.py
 generate_ai_report.py
@@ -190,27 +199,31 @@ report because `GEMINI_API_KEY` wasn't set yet) will simply retry next time.
 | # | Step | What it does | Depends on |
 |---|---|---|---|
 | 1 | **Subdomain Enumeration** | Runs subfinder/amass/sublist3r/gobuster/**SubEnum**/**assetfinder**, merges + dedupes into `all_subdomains.txt`. (SubEnum itself wraps several of the same tools plus crt.sh/wayback — overlap is expected and harmless, everything gets deduped.) | target domain (scope-checked first, see §1.3) |
-| 2 | **Subdomain Permutation** | `alterx` generates candidate variations (`dev-api.`, `staging.`...) from step 1's results; `dnsx` keeps only ones that actually resolve; merges back into `all_subdomains.txt` | step 1 |
-| 3 | **DNS Resolution Check** | `dnsx` filters the full subdomain list down to `resolved_subdomains.txt` so later steps don't waste time probing dead hosts. (Deliberately **not** used for the takeover check — dangling/non-resolving CNAMEs are exactly what that step looks for.) | steps 1–2 |
-| 4 | **Probe Alive Hosts** | `httpx` checks which resolved hosts are actually serving HTTP(S), grabs title/tech/status/IP | step 3 |
-| 5 | **Content Discovery** | `ffuf` + `dirsearch` directory/file brute-force against every live host with a wordlist (ffuf) and dirsearch's bundled lists — results from both are merged and deduped, with a path found by both tools flagged as a stronger signal. Uses ffuf's built-in auto-calibration (`-ac`) to filter soft-404/custom-not-found pages. This is the main lever for finding endpoints/panels that no other step would ever guess. | step 4 |
-| 6 | **Sensitive File Exposure Check** | Probes ~40 *known* paths per live host (`.git/HEAD`, `.env`, backups, cloud creds, swagger, actuator...) — a curated list rather than a wordlist brute-force. Uses a random-path **baseline request** first so custom "soft-404" pages don't produce false positives. | step 4 |
-| 7 | **WordPress Detection + Vuln Scan** | Confirms WordPress via tech-detect + active checks (`wp-login.php`, `wp-json`), reads version from `readme.html`, enumerates usernames via the public `/wp-json/wp/v2/users` endpoint, checks `xmlrpc.php` reachability, then runs nuclei's WordPress core/plugin/theme CVE templates against confirmed hosts only | step 4 |
-| 8 | **API Endpoint Extraction** | Probes for exposed OpenAPI/Swagger specs (parses `paths` to list every documented endpoint+method) and GraphQL introspection (lists every query/mutation if introspection is enabled) | step 4 |
-| 9 | **CORS + Security Headers Check** | Sends requests with crafted `Origin` headers (arbitrary origin, `null`, prefix/suffix substring tricks) to catch reflected-origin and other CORS misconfigs; also flags missing CSP/X-Frame-Options/HSTS/X-Content-Type-Options | step 4 |
-| 10 | **Security Misconfiguration Check** | Goes deeper than step 9's presence-check: CSP/HSTS/X-Frame-Options *quality* (unsafe-inline, short max-age...), insecure cookies (missing Secure/HttpOnly/SameSite), directory listing pages, verbose debug headers/stack traces, and exposed health/metrics endpoints | step 4 |
-| 11 | **IP-Restriction Bypass Check** | Tests whether paths that returned 401/403 (from steps 5/6's findings, or a small fallback list) can be bypassed by spoofing IP headers (`X-Forwarded-For`, `X-Real-IP`, etc.) — a real access-control vulnerability (CWE-290), not a WAF-evasion technique for the scanner itself | steps 5, 6 |
-| 12 | **Collect URLs** | `waybackurls` + `gau` pull historical URLs for every live host | step 4 |
-| 13 | **Parameter Discovery** | Splits URLs into with/without query params; runs `arjun` (hidden param brute-force) and `paramspider` | step 12 |
-| 14 | **Open Redirect / SSRF / IDOR Flagging** | **Passive** — no requests sent. Classifies query parameter names+values against known-risky patterns (`redirect=`, `url=`, numeric `id=`...) with a strong/weak confidence signal | step 13 |
-| 15 | **XSS Scan (dalfox)** | Runs `dalfox` against every collected parameterized URL | step 13 |
-| 16 | **Nuclei Vulnerability Scan** | Three passes: all severities, high/critical only, and a broader `-tags exposure,misconfig,default-login,...` pass to catch "easy win" bugs nuclei itself rates as low/info severity | step 4 |
-| 17 | **Subdomain Takeover Check** | `subjack` against the **full unfiltered** subdomain list | step 1 |
-| 18 | **Sensitive Keyword Grep** | Greps collected URLs for `admin`, `debug`, `token`, `internal`, etc. | step 12 |
-| 19 | **JavaScript File Harvest** | Downloads every `.js` file referenced in collected URLs, then scans them for secrets (AWS/Google/Slack/Stripe/GitHub keys, JWTs, private keys...) and hidden endpoints. Each secret gets a `confidence: high/low` score from Shannon entropy + a placeholder-word denylist, to cut false positives | step 12 |
-| 20 | **Cloud Exposure** | Guesses + actively checks S3/Azure bucket names derived from the domain; passively extracts bucket references already seen in collected URLs/JS; searches GitHub for related public repos; probes for exposed CI/CD and Docker/Kubernetes config files | steps 4, 12, 19 |
-| 21 | **Exposed Source Map Recovery** | Looks for `.js.map` files (via the `sourceMappingURL` comment or the `<file>.map` convention). If found, reconstructs the **original unminified source code** from `sourcesContent` and runs the same secret/endpoint scanner from step 19 against it — unminified code is far more readable and often reveals more | step 19 |
-| 22 | **AI Attack Surface Report** | Sends a condensed summary of every step's findings to Gemini, gets back a structured risk assessment, writes `report/attack_surface_report.html` (dashboard) + `.json` | all steps |
+| 2 | **Shodan Asset Discovery** | Queries Shodan for `hostname:<domain>` and `ssl:<domain>` — strictly scoped to assets that actually match the target, not a broad internet search. Surfaces any known CVEs Shodan's own vulnerability database already has for those specific assets, and merges any newly-seen subdomains back into `all_subdomains.txt`. Requires `SHODAN_API_KEY`. | step 1 |
+| 3 | **Subdomain Permutation** | `alterx` generates candidate variations (`dev-api.`, `staging.`...) from steps 1–2's results; `dnsx` keeps only ones that actually resolve; merges back into `all_subdomains.txt` | steps 1–2 |
+| 4 | **DNS Resolution Check** | `dnsx` filters the full subdomain list down to `resolved_subdomains.txt` so later steps don't waste time probing dead hosts. (Deliberately **not** used for the takeover check — dangling/non-resolving CNAMEs are exactly what that step looks for.) | steps 1–3 |
+| 5 | **IP Address Export** | `dnsx -a -resp` resolves the real IP address(es) behind every scanned domain and exports a clean `domain -> ip` mapping — basic record-keeping of exactly what was tested, not a CDN/WAF-bypass technique. | step 4 |
+| 6 | **Probe Alive Hosts** | `httpx` checks which resolved hosts are actually serving HTTP(S), grabs title/tech/status/IP | step 4 |
+| 7 | **Content Discovery** | `ffuf` + `dirsearch` directory/file brute-force against every live host with a wordlist (ffuf) and dirsearch's bundled lists — results from both are merged and deduped, with a path found by both tools flagged as a stronger signal. Uses ffuf's built-in auto-calibration (`-ac`) to filter soft-404/custom-not-found pages. This is the main lever for finding endpoints/panels that no other step would ever guess. | step 6 |
+| 8 | **Sensitive File Exposure Check** | Probes ~40 *known* paths per live host (`.git/HEAD`, `.env`, backups, cloud creds, swagger, actuator...) — a curated list rather than a wordlist brute-force. Uses a random-path **baseline request** first so custom "soft-404" pages don't produce false positives. | step 6 |
+| 9 | **Login Page Discovery** | Probes ~20 common login paths per host plus any login-looking URLs already found by steps 7–8, confirming each with a real `<input type="password">` field (high confidence) or strong keyword match (medium confidence). Writes a clean, dedicated `report/login_pages.txt` — good manual-testing targets for default creds/brute-force/MFA bypass. | steps 6–8 |
+| 10 | **WordPress Detection + Vuln Scan** | Confirms WordPress via tech-detect + active checks (`wp-login.php`, `wp-json`), reads version from `readme.html`, enumerates usernames via the public `/wp-json/wp/v2/users` endpoint, checks `xmlrpc.php` reachability, then runs nuclei's WordPress core/plugin/theme CVE templates against confirmed hosts only | step 6 |
+| 11 | **API Endpoint Extraction** | Probes for exposed OpenAPI/Swagger specs (parses `paths` to list every documented endpoint+method) and GraphQL introspection (lists every query/mutation if introspection is enabled) | step 6 |
+| 12 | **CORS + Security Headers Check** | Sends requests with crafted `Origin` headers (arbitrary origin, `null`, prefix/suffix substring tricks) to catch reflected-origin and other CORS misconfigs; also flags missing CSP/X-Frame-Options/HSTS/X-Content-Type-Options | step 6 |
+| 13 | **Security Misconfiguration Check** | Goes deeper than step 12's presence-check: CSP/HSTS/X-Frame-Options *quality* (unsafe-inline, short max-age...), insecure cookies (missing Secure/HttpOnly/SameSite), directory listing pages, verbose debug headers/stack traces, and exposed health/metrics endpoints | step 6 |
+| 14 | **IP-Restriction Bypass Check** | Tests whether paths that returned 401/403 (from steps 7/8's findings, or a small fallback list) can be bypassed by spoofing IP headers (`X-Forwarded-For`, `X-Real-IP`, etc.) — a real access-control vulnerability (CWE-290), not a WAF-evasion technique for the scanner itself | steps 7, 8 |
+| 15 | **Collect URLs** | `waybackurls` + `gau` pull historical URLs for every live host | step 6 |
+| 16 | **Parameter Discovery** | Splits URLs into with/without query params; runs `arjun` (hidden param brute-force) and `paramspider` | step 15 |
+| 17 | **Open Redirect / SSRF / IDOR Flagging** | **Passive** — no requests sent. Classifies query parameter names+values against known-risky patterns (`redirect=`, `url=`, numeric `id=`...) with a strong/weak confidence signal | step 16 |
+| 18 | **XSS Scan (dalfox)** | Runs `dalfox` against every collected parameterized URL | step 16 |
+| 19 | **Nuclei Vulnerability Scan** | Three passes: all severities, high/critical only, and a broader `-tags exposure,misconfig,default-login,...` pass to catch "easy win" bugs nuclei itself rates as low/info severity | step 6 |
+| 20 | **Subdomain Takeover Check** | `subjack` against the **full unfiltered** subdomain list | step 1 |
+| 21 | **Sensitive Keyword Grep** | Greps collected URLs for `admin`, `debug`, `token`, `internal`, etc. | step 15 |
+| 22 | **JavaScript File Harvest** | Downloads every `.js` file referenced in collected URLs, then scans them for secrets (AWS/Google/Slack/Stripe/GitHub keys, JWTs, private keys...) and hidden endpoints. Each secret gets a `confidence: high/low` score from Shannon entropy + a placeholder-word denylist, to cut false positives | step 15 |
+| 23 | **Cloud Exposure** | Guesses + actively checks S3/Azure bucket names derived from the domain; passively extracts bucket references already seen in collected URLs/JS; searches GitHub for related public repos; probes for exposed CI/CD and Docker/Kubernetes config files | steps 6, 15, 22 |
+| 24 | **Exposed Source Map Recovery** | Looks for `.js.map` files (via the `sourceMappingURL` comment or the `<file>.map` convention). If found, reconstructs the **original unminified source code** from `sourcesContent` and runs the same secret/endpoint scanner from step 22 against it — unminified code is far more readable and often reveals more | step 22 |
+| 25 | **Correlation Engine** | Deterministic, rule-based cross-referencing of every step's findings, grouped by host — surfaces compound-risk patterns (e.g. WordPress + a matched CVE, or a login page + enumerated usernames) that no single step would flag alone. Not AI-generated; each finding is backed by two or more independent steps agreeing. | all prior steps |
+| 26 | **AI Attack Surface Report** | Sends a condensed summary of every step's findings — with the correlation engine's output given top priority — to Gemini, gets back a structured risk assessment, writes `report/attack_surface_report.html` (dashboard) + `.json` | all steps |
 
 ---
 
@@ -245,6 +258,10 @@ recon-<domain>-<timestamp>/
     ├── js_findings.json/.txt
     ├── source_maps.json/.txt
     ├── wordpress.json/.txt
+    ├── login_pages.json/.txt          # dedicated .txt is plain URLs only, one per line
+    ├── shodan.json/.txt
+    ├── domain_ips.json/.txt, unique_ips.txt
+    ├── correlations.json/.txt         # cross-referenced compound-risk findings
     └── attack_surface_report.html # <- start here
 ```
 

@@ -78,6 +78,12 @@ check_dependencies() {
     echo -e "  ${yellow}⚠${reset} GEMINI_API_KEY not set (.env missing or empty) — the AI report step will be skipped"
   fi
 
+  if [[ -n "$SHODAN_API_KEY" ]]; then
+    echo -e "  ${green}✓${reset} SHODAN_API_KEY is set"
+  else
+    echo -e "  ${yellow}⚠${reset} SHODAN_API_KEY not set — the Shodan asset discovery step will be skipped"
+  fi
+
   echo ""
   echo -e "${dim}────────────────────────────────────────────────────────────${reset}"
   if [[ $missing_required -gt 0 ]]; then
@@ -141,9 +147,10 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
+  "Shodan Asset Discovery"
   "Subdomain Permutation (alterx)"
   "DNS Resolution Check"
   "IP Address Export"
@@ -296,6 +303,15 @@ step_subdomains() {
   cat ./*.txt 2>/dev/null | cut -d ' ' -f1 | sed '/^$/d' | sort -u > ../all_subdomains.txt
   cd ..
   echo -e "${green}[+] Total unique subdomains: $(wc -l < all_subdomains.txt)${reset}"
+}
+
+step_shodan() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping Shodan check${reset}"
+    return 0
+  fi
+  python3 check_shodan.py "$domain"
 }
 
 step_permutation() {
@@ -776,6 +792,7 @@ fi
 
 mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,content_discovery,urls,params,nuclei,takeover,js,wordpress,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/check_shodan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/merge_ffuf_results.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_sensitive_files.py" "$WORKDIR/" 2>/dev/null
@@ -803,6 +820,7 @@ fi
 # RUN ALL STEPS (each one auto-skips if already checkpointed)
 ###############################################################################
 run_step subdomains      step_subdomains
+run_step shodan          step_shodan
 run_step permutation     step_permutation
 run_step resolve         step_resolve
 run_step ip_export       step_ip_export
