@@ -109,7 +109,7 @@ def build_host_data():
         "cors": [], "misconfig": [], "wordpress": None, "nuclei_critical": [],
         "nuclei_exposures": [], "nuclei_wordpress": [], "js_secrets": [],
         "cicd_k8s": [], "graphql": [], "openapi": [], "cloud_buckets": [],
-        "login_pages": [],
+        "login_pages": [], "sqli": [],
     })
 
     for f in (read_json("report/sensitive_files.json", {}) or {}).get("findings", []):
@@ -185,6 +185,11 @@ def build_host_data():
         h = normalize_host(lp.get("url"))
         if h:
             host_data[h]["login_pages"].append(lp)
+
+    for s in (read_json("report/sqli_findings.json", {}) or {}).get("findings", []):
+        h = normalize_host(s.get("url"))
+        if h:
+            host_data[h]["sqli"].append(s)
 
     return host_data
 
@@ -311,6 +316,35 @@ def rule_login_plus_ip_bypass(host, d):
     return None
 
 
+def rule_confirmed_sqli(host, d):
+    if d["sqli"]:
+        params = [f"{s['parameter']} ({s['method']})" for s in d["sqli"]]
+        dbms = next((s.get("dbms") for s in d["sqli"] if s.get("dbms")), None)
+        return {
+            "name": "Confirmed SQL injection (sqlmap, detection-only)",
+            "severity": "critical",
+            "host": host,
+            "explanation": f"sqlmap confirmed {len(d['sqli'])} injectable parameter(s) on this host: "
+                            f"{', '.join(params)}."
+                            + (f" Back-end DBMS: {dbms}." if dbms else "")
+                            + " No data was extracted (detection-only run) — this needs immediate manual follow-up.",
+        }
+    return None
+
+
+def rule_sqli_plus_login(host, d):
+    if d["sqli"] and d["login_pages"]:
+        return {
+            "name": "Confirmed SQL injection on a host with a working login page",
+            "severity": "critical",
+            "host": host,
+            "explanation": "A confirmed, injectable parameter exists on the same host as a working login page — "
+                            "worth specifically checking whether the injection point is reachable from the "
+                            "authentication flow itself (classic SQLi auth bypass), not just elsewhere on the site.",
+        }
+    return None
+
+
 NAMED_RULES = [
     rule_wordpress_plus_cve,
     rule_admin_panel_plus_ip_bypass,
@@ -320,6 +354,8 @@ NAMED_RULES = [
     rule_cicd_plus_cloud,
     rule_login_plus_known_usernames,
     rule_login_plus_ip_bypass,
+    rule_confirmed_sqli,
+    rule_sqli_plus_login,
 ]
 
 
@@ -341,6 +377,28 @@ def cumulative_score(d):
     return score
 
 
+def shodan_correlations():
+    """Every Shodan asset with a known CVE is inherently a compound finding:
+    an independent, external vulnerability database has already confirmed
+    a real CVE on infrastructure genuinely belonging to this domain (matched
+    via hostname/SSL cert, not a broad scan)."""
+    data = read_json("report/shodan.json", {}) or {}
+    findings = []
+    for asset in data.get("hosts", []):
+        if asset.get("vuln_count", 0) > 0:
+            host_label = ", ".join(asset.get("hostnames") or []) or asset.get("ip")
+            findings.append({
+                "name": "Shodan-confirmed known CVE on target infrastructure",
+                "severity": "critical" if asset["vuln_count"] > 1 else "high",
+                "host": f"{asset.get('ip')}:{asset.get('port')} ({host_label})",
+                "explanation": f"Shodan's own vulnerability database already lists {asset['vuln_count']} known "
+                                f"CVE(s) for this asset: {', '.join(asset.get('known_cves', []))} — running "
+                                f"{asset.get('product') or 'an unidentified service'}. This is an independent, "
+                                "external confirmation, not a guess from this pipeline's own scanning.",
+            })
+    return findings
+
+
 def main():
     host_data = build_host_data()
     correlations = []
@@ -352,6 +410,8 @@ def main():
             result = rule(host, d)
             if result:
                 correlations.append(result)
+
+    correlations.extend(shodan_correlations())
 
     # Generic cumulative-risk pass: hosts with many small findings across
     # different categories, even without a specific named pattern matching.

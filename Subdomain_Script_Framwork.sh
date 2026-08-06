@@ -29,6 +29,7 @@ EXTERNAL_TOOLS=(
   "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
   "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
   "ffuf:no"           "subenum:no"       "assetfinder:no"    "dirsearch:no"
+  "nikto:no"          "sqlmap:no"
 )
 PYTHON_PACKAGES=("requests")
 
@@ -103,6 +104,8 @@ check_dependencies() {
   echo -e "${dim}  go install github.com/ffuf/ffuf/v2@latest${reset}"
   echo -e "${dim}  # ffuf needs a wordlist too: sudo apt install seclists  (or clone github.com/danielmiessler/SecLists)${reset}"
   echo -e "${dim}  git clone https://github.com/bing0o/SubEnum.git && cd SubEnum && ./setup.sh${reset}"
+  echo -e "${dim}  apt install nikto  (or git clone github.com/sullo/nikto)${reset}"
+  echo -e "${dim}  apt install sqlmap  (or git clone github.com/sqlmapproject/sqlmap)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/assetfinder@latest${reset}"
   echo -e "${dim}  pip install dirsearch  (or git clone github.com/maurosoria/dirsearch)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
@@ -147,7 +150,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains shodan permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig ip_bypass urls params param_flagging xss nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Shodan Asset Discovery"
@@ -162,11 +165,13 @@ STEP_LABELS=(
   "API Endpoint Extraction (Swagger/GraphQL)"
   "CORS + Security Headers Check"
   "Security Misconfiguration Check"
+  "Nikto Server Scan"
   "IP-Restriction Bypass Check"
   "Collect URLs (Wayback/GAU)"
   "Parameter Discovery"
   "Open Redirect / SSRF / IDOR Flagging"
   "XSS Scan (dalfox)"
+  "SQL Injection Detection (sqlmap)"
   "Nuclei Vulnerability Scan"
   "Subdomain Takeover Check"
   "Sensitive Keyword Grep"
@@ -506,6 +511,32 @@ step_misconfig() {
   python3 check_misconfig.py
 }
 
+step_nikto() {
+  mkdir -p nikto report
+  if ! check_tool nikto; then
+    return 0
+  fi
+  if [[ ! -s live/httpx_live.txt ]]; then
+    echo -e "${yellow}  no live hosts to scan — skipping${reset}"
+    return 0
+  fi
+  local hosts_total hosts_done=0
+  hosts_total=$(wc -l < live/httpx_live.txt)
+  while read -r line; do
+    [[ -z "$line" ]] && continue
+    local host safe_name
+    host=$(echo "$line" | awk '{print $1}')
+    safe_name=$(echo "$host" | sed 's/[^a-zA-Z0-9]/_/g')
+    hosts_done=$((hosts_done+1))
+    printf "\r${cyan}⠋${reset} Nikto scan  ${green}%d/%d hosts${reset}   " "$hosts_done" "$hosts_total"
+    nikto -h "$host" -o "nikto/nikto_${safe_name}.txt" -Format txt -ask no > /dev/null 2>&1
+  done < live/httpx_live.txt
+  echo ""
+  if command -v python3 &> /dev/null; then
+    python3 parse_nikto.py
+  fi
+}
+
 step_ip_bypass() {
   mkdir -p report
   if ! command -v python3 &> /dev/null; then
@@ -564,6 +595,26 @@ step_xss() {
   run_with_progress "dalfox" "dalfox_xss.txt" -- \
     dalfox file ../params/urls_with_params.txt --silence --no-color -w "$THREADS" -o dalfox_xss.txt
   cd ..
+}
+
+step_sqli_scan() {
+  mkdir -p report
+  if ! check_tool sqlmap; then
+    return 0
+  fi
+  if [[ ! -s params/urls_with_params.txt ]]; then
+    echo -e "${yellow}  no parameterized URLs to test — skipping${reset}"
+    return 0
+  fi
+  # Detection-only: --level=1 --risk=1 is sqlmap's least invasive setting.
+  # Deliberately NO --dump / --os-shell / --sql-shell / enumeration flags —
+  # this confirms injectability, it does not extract data.
+  run_with_progress "sqlmap" "" -- \
+    sqlmap -m params/urls_with_params.txt --batch --level=1 --risk=1 \
+      --output-dir=sqlmap_output --disable-coloring
+  if command -v python3 &> /dev/null; then
+    python3 parse_sqlmap.py
+  fi
 }
 
 step_nuclei() {
@@ -790,7 +841,7 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,content_discovery,urls,params,nuclei,takeover,js,wordpress,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,content_discovery,urls,params,nuclei,takeover,js,wordpress,nikto,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_shodan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
@@ -802,6 +853,8 @@ cp "$SCRIPT_DIR/flag_interesting_params.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/extract_api_endpoints.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/parse_nikto.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/parse_sqlmap.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
@@ -832,11 +885,13 @@ run_step wordpress       step_wordpress
 run_step api_extraction  step_api_extraction
 run_step cors_headers    step_cors_headers
 run_step misconfig       step_misconfig
+run_step nikto           step_nikto
 run_step ip_bypass       step_ip_bypass
 run_step urls            step_urls
 run_step params          step_params
 run_step param_flagging  step_param_flagging
 run_step xss             step_xss
+run_step sqli_scan       step_sqli_scan
 run_step nuclei          step_nuclei
 run_step takeover        step_takeover
 run_step keywords        step_keywords

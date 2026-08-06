@@ -51,6 +51,9 @@ def build_context(domain):
     ip_bypass = read_json("report/ip_bypass.json", {}) or {}
     correlations = read_json("report/correlations.json", {}) or {}
     login_pages = read_json("report/login_pages.json", {}) or {}
+    nikto_data = read_json("report/nikto.json", {}) or {}
+    sqli_data = read_json("report/sqli_findings.json", {}) or {}
+    shodan_data = read_json("report/shodan.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
     all_secrets = js_findings.get("secrets", [])
@@ -93,6 +96,10 @@ def build_context(domain):
         "ip_bypass_findings": ip_bypass.get("findings", [])[:60],
         "correlations": correlations.get("correlations", []),
         "login_pages": login_pages.get("login_pages", [])[:60],
+        "nikto_results": nikto_data.get("results", [])[:30],
+        "sqli_findings": sqli_data.get("findings", []),
+        "shodan_assets": shodan_data.get("hosts", [])[:60],
+        "shodan_vuln_count": shodan_data.get("assets_with_known_cves", 0),
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
         "source_maps_found": source_map_findings.get("maps_found", 0),
         "source_map_recovered_files": source_map_findings.get("total_recovered_files", 0),
@@ -156,6 +163,9 @@ RAW DATA:
 - Content discovery results (ffuf directory/file brute-force with auto-calibration against soft-404s — each entry is a confirmed accessible path not found through any other passive method; look especially for admin/internal/debug/backup-sounding paths and unusual status codes like 401/403 that hint at something worth auth-bypass testing): {json.dumps(ctx['content_discovery'])}
 - CONFIRMED IP-restriction bypasses (a path that returned 401/403 normally but returned a different status when a spoofed IP header like X-Forwarded-For was sent — this is a real, confirmed access-control vulnerability, not a lead; rate high/critical depending on what the bypassed path appears to expose): {json.dumps(ctx['ip_bypass_findings'])}
 - Working login pages found (confirmed live, high-confidence entries have an actual <input type="password"> field verified — these are good targets for manual testing of default creds, rate-limiting/brute-force protection, and MFA bypass; not vulnerabilities on their own, just confirmed attack-surface entry points worth listing as interesting_endpoints): {json.dumps(ctx['login_pages'])}
+- Nikto web server scan findings (dangerous files, outdated server banners, common misconfigurations — a mix of severities, use judgment on what's actually notable vs routine): {json.dumps(ctx['nikto_results'])}
+- CONFIRMED SQL injection points (sqlmap, detection-only run — no data was extracted, just confirmed the parameter is injectable; this is a serious, confirmed vulnerability and should generally be rated critical): {json.dumps(ctx['sqli_findings'])}
+- Shodan-indexed assets belonging to this domain (found via hostname/SSL-cert match, scoped strictly to the target — NOT a broad internet scan). {ctx['shodan_vuln_count']} of these already have known CVEs per Shodan's own vulnerability database (see each asset's known_cves field). Treat known_cves as CONFIRMED, high-priority findings — these are publicly documented vulnerabilities on infrastructure this organization actually owns, often on IPs/ports the rest of the pipeline never touched (e.g. non-HTTP services): {json.dumps(ctx['shodan_assets'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
 - High-confidence secrets found INSIDE recovered unminified source code (these came from real original source files, not minified bundles — generally more reliable than the minified-JS secret scan above): {json.dumps(ctx['source_map_secrets'])}
@@ -394,6 +404,34 @@ def render_html(domain, report, ctx):
         for l in ctx.get("login_pages", [])
     )
 
+    sqli_rows = ""
+    for s in ctx.get("sqli_findings", []):
+        types_str = ", ".join(t.get("type", "") for t in s.get("types", []))
+        sqli_rows += f"""<tr>
+          <td><code>{html.escape(s.get('url') or '')}</code></td>
+          <td><code>{html.escape(s.get('parameter',''))} ({html.escape(s.get('method',''))})</code></td>
+          <td>{html.escape(s.get('dbms') or '?')}</td>
+          <td>{html.escape(types_str)}</td>
+        </tr>"""
+
+    nikto_rows = ""
+    for r in ctx.get("nikto_results", []):
+        findings_preview = "; ".join(r.get("findings", [])[:5])
+        nikto_rows += f"""<tr>
+          <td>{html.escape(r.get('host_label',''))}</td>
+          <td>{html.escape(findings_preview)}{' ...' if len(r.get('findings', [])) > 5 else ''}</td>
+        </tr>"""
+
+    shodan_rows = ""
+    for a in ctx.get("shodan_assets", []):
+        cve_badge = sev_badge("critical" if a.get("vuln_count", 0) > 1 else ("high" if a.get("vuln_count") else "low"))
+        shodan_rows += f"""<tr>
+          <td><code>{html.escape(str(a.get('ip','')))}:{a.get('port','')}</code></td>
+          <td>{html.escape(', '.join(a.get('hostnames') or []))}</td>
+          <td>{html.escape(a.get('product') or '?')}</td>
+          <td>{cve_badge} {html.escape(', '.join(a.get('known_cves') or []))}</td>
+        </tr>"""
+
     js_rows = ""
     for s in report.get("js_secrets_triage", []):
         likely = s.get("likely_real", False)
@@ -536,6 +574,26 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>URL</b></td><td><b>Confidence</b></td></tr>
     {login_rows or "<tr><td colspan='2'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Confirmed SQL Injection (sqlmap, detection-only)</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">--level=1 --risk=1, no data extracted — confirmed injectable parameters only.</p>
+  <table>
+    <tr><td><b>URL</b></td><td><b>Parameter</b></td><td><b>DBMS</b></td><td><b>Type(s)</b></td></tr>
+    {sqli_rows or "<tr><td colspan='4'>None found.</td></tr>"}
+  </table>
+
+  <div class="section-title">Nikto Server Scan</div>
+  <table>
+    <tr><td><b>Host</b></td><td><b>Findings</b></td></tr>
+    {nikto_rows or "<tr><td colspan='2'>None found (or nikto not installed).</td></tr>"}
+  </table>
+
+  <div class="section-title">Shodan Asset Discovery</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Scoped to hostname/SSL-cert match for this domain only — known CVEs are Shodan's own vulnerability database, not actively exploited by this pipeline.</p>
+  <table>
+    <tr><td><b>IP:Port</b></td><td><b>Hostname(s)</b></td><td><b>Product</b></td><td><b>Known CVEs</b></td></tr>
+    {shodan_rows or "<tr><td colspan='4'>None found (or SHODAN_API_KEY not set).</td></tr>"}
   </table>
 
   <div class="section-title">Secrets Recovered from Exposed Source Maps</div>
