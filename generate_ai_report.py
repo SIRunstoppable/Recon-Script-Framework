@@ -53,6 +53,7 @@ def build_context(domain):
     login_pages = read_json("report/login_pages.json", {}) or {}
     nikto_data = read_json("report/nikto.json", {}) or {}
     sqli_data = read_json("report/sqli_findings.json", {}) or {}
+    waf_data = read_json("report/waf_detection.json", {}) or {}
     shodan_data = read_json("report/shodan.json", {}) or {}
     source_map_findings = read_json("report/source_maps.json", {}) or {}
     wp_findings = read_json("report/wordpress.json", {}) or {}
@@ -98,6 +99,7 @@ def build_context(domain):
         "login_pages": login_pages.get("login_pages", [])[:60],
         "nikto_results": nikto_data.get("results", [])[:30],
         "sqli_findings": sqli_data.get("findings", []),
+        "waf_detections": waf_data.get("detections", {}),
         "shodan_assets": shodan_data.get("hosts", [])[:60],
         "shodan_vuln_count": shodan_data.get("assets_with_known_cves", 0),
         "xss_findings": read_lines("nuclei/dalfox_xss.txt", 150),
@@ -165,6 +167,7 @@ RAW DATA:
 - Working login pages found (confirmed live, high-confidence entries have an actual <input type="password"> field verified — these are good targets for manual testing of default creds, rate-limiting/brute-force protection, and MFA bypass; not vulnerabilities on their own, just confirmed attack-surface entry points worth listing as interesting_endpoints): {json.dumps(ctx['login_pages'])}
 - Nikto web server scan findings (dangerous files, outdated server banners, common misconfigurations — a mix of severities, use judgment on what's actually notable vs routine): {json.dumps(ctx['nikto_results'])}
 - CONFIRMED SQL injection points (sqlmap, detection-only run — no data was extracted, just confirmed the parameter is injectable; this is a serious, confirmed vulnerability and should generally be rated critical): {json.dumps(ctx['sqli_findings'])}
+- WAF/CDN detected per host (purely informational context, NOT a finding — use this to explain why certain hosts may have returned thin/filtered results elsewhere in the scan, don't list it as a vulnerability): {json.dumps(ctx['waf_detections'])}
 - Shodan-indexed assets belonging to this domain (found via hostname/SSL-cert match, scoped strictly to the target — NOT a broad internet scan). {ctx['shodan_vuln_count']} of these already have known CVEs per Shodan's own vulnerability database (see each asset's known_cves field). Treat known_cves as CONFIRMED, high-priority findings — these are publicly documented vulnerabilities on infrastructure this organization actually owns, often on IPs/ports the rest of the pipeline never touched (e.g. non-HTTP services): {json.dumps(ctx['shodan_assets'])}
 - Dalfox XSS scan output (automated payload-based scan against parameterized URLs — findings here are generally strong signal but still worth a quick manual confirm): {json.dumps(ctx['xss_findings'])}
 - Exposed source maps (.js.map) found: {ctx['source_maps_found']} (recovered {ctx['source_map_recovered_files']} original, unminified source files from them)
@@ -422,6 +425,11 @@ def render_html(domain, report, ctx):
           <td>{html.escape(findings_preview)}{' ...' if len(r.get('findings', [])) > 5 else ''}</td>
         </tr>"""
 
+    waf_rows = ""
+    for host, detections in ctx.get("waf_detections", {}).items():
+        names = ", ".join(d.get("name", "") for d in detections)
+        waf_rows += f"<tr><td><code>{html.escape(host)}</code></td><td>{html.escape(names)}</td></tr>"
+
     shodan_rows = ""
     for a in ctx.get("shodan_assets", []):
         cve_badge = sev_badge("critical" if a.get("vuln_count", 0) > 1 else ("high" if a.get("vuln_count") else "low"))
@@ -587,6 +595,13 @@ def render_html(domain, report, ctx):
   <table>
     <tr><td><b>Host</b></td><td><b>Findings</b></td></tr>
     {nikto_rows or "<tr><td colspan='2'>None found (or nikto not installed).</td></tr>"}
+  </table>
+
+  <div class="section-title">WAF / CDN Detected</div>
+  <p style="font-size:13px;color:#94a3b8;margin-top:-6px;">Informational only — explains why some hosts may show thinner scan results. Not a vulnerability.</p>
+  <table>
+    <tr><td><b>Host</b></td><td><b>WAF/CDN</b></td></tr>
+    {waf_rows or "<tr><td colspan='2'>None detected.</td></tr>"}
   </table>
 
   <div class="section-title">Shodan Asset Discovery</div>

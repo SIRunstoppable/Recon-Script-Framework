@@ -29,7 +29,7 @@ EXTERNAL_TOOLS=(
   "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
   "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
   "ffuf:no"           "subenum:no"       "assetfinder:no"    "dirsearch:no"
-  "nikto:no"          "sqlmap:no"
+  "nikto:no"          "sqlmap:no"        "wafw00f:no"
 )
 PYTHON_PACKAGES=("requests")
 
@@ -106,6 +106,7 @@ check_dependencies() {
   echo -e "${dim}  git clone https://github.com/bing0o/SubEnum.git && cd SubEnum && ./setup.sh${reset}"
   echo -e "${dim}  apt install nikto  (or git clone github.com/sullo/nikto)${reset}"
   echo -e "${dim}  apt install sqlmap  (or git clone github.com/sqlmapproject/sqlmap)${reset}"
+  echo -e "${dim}  pip install wafw00f${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/assetfinder@latest${reset}"
   echo -e "${dim}  pip install dirsearch  (or git clone github.com/maurosoria/dirsearch)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
@@ -150,7 +151,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains shodan permutation resolve ip_export probe content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Shodan Asset Discovery"
@@ -158,6 +159,7 @@ STEP_LABELS=(
   "DNS Resolution Check"
   "IP Address Export"
   "Probe Alive Hosts"
+  "WAF/CDN Detection"
   "Content Discovery (ffuf)"
   "Sensitive File Exposure Check"
   "Login Page Discovery"
@@ -394,6 +396,33 @@ step_probe() {
   fi
   cd ..
   echo -e "${green}[+] Live hosts: $(cat live/httpx_live.txt 2>/dev/null | wc -l | tr -d ' ')${reset}"
+}
+
+step_waf_detect() {
+  mkdir -p waf report
+  if [[ ! -s live/httpx_live.txt ]]; then
+    echo -e "${yellow}  no live hosts to check — skipping${reset}"
+    return 0
+  fi
+  if check_tool wafw00f; then
+    local hosts_total hosts_done=0
+    hosts_total=$(wc -l < live/httpx_live.txt)
+    while read -r line; do
+      [[ -z "$line" ]] && continue
+      local host safe_name
+      host=$(echo "$line" | awk '{print $1}')
+      safe_name=$(echo "$host" | sed 's/[^a-zA-Z0-9]/_/g')
+      hosts_done=$((hosts_done+1))
+      printf "\r${cyan}⠋${reset} WAF fingerprinting  ${green}%d/%d hosts${reset}   " "$hosts_done" "$hosts_total"
+      wafw00f "$host" -a > "waf/wafw00f_${safe_name}.txt" 2>/dev/null
+    done < live/httpx_live.txt
+    echo ""
+  else
+    echo -e "${yellow}  wafw00f not installed — using built-in header-fingerprint fallback only${reset}"
+  fi
+  if command -v python3 &> /dev/null; then
+    python3 fingerprint_waf.py
+  fi
 }
 
 step_content_discovery() {
@@ -841,7 +870,7 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,content_discovery,urls,params,nuclei,takeover,js,wordpress,nikto,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,waf,content_discovery,urls,params,nuclei,takeover,js,wordpress,nikto,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_shodan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
@@ -855,6 +884,7 @@ cp "$SCRIPT_DIR/check_cors_headers.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_nikto.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_sqlmap.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/fingerprint_waf.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
@@ -878,6 +908,7 @@ run_step permutation     step_permutation
 run_step resolve         step_resolve
 run_step ip_export       step_ip_export
 run_step probe            step_probe
+run_step waf_detect       step_waf_detect
 run_step content_discovery step_content_discovery
 run_step sensitive_files step_sensitive_files
 run_step login_pages     step_login_pages
