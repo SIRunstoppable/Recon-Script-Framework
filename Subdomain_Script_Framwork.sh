@@ -29,7 +29,7 @@ EXTERNAL_TOOLS=(
   "httpx:no"          "waybackurls:no"   "gau:no"            "arjun:no"
   "paramspider:no"    "nuclei:no"        "subjack:no"        "dalfox:no"
   "ffuf:no"           "subenum:no"       "assetfinder:no"    "dirsearch:no"
-  "nikto:no"          "sqlmap:no"        "wafw00f:no"
+  "nikto:no"          "sqlmap:no"        "wafw00f:no"        "commix:no"
 )
 PYTHON_PACKAGES=("requests")
 
@@ -107,6 +107,7 @@ check_dependencies() {
   echo -e "${dim}  apt install nikto  (or git clone github.com/sullo/nikto)${reset}"
   echo -e "${dim}  apt install sqlmap  (or git clone github.com/sqlmapproject/sqlmap)${reset}"
   echo -e "${dim}  pip install wafw00f${reset}"
+  echo -e "${dim}  git clone https://github.com/commixproject/commix.git${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/assetfinder@latest${reset}"
   echo -e "${dim}  pip install dirsearch  (or git clone github.com/maurosoria/dirsearch)${reset}"
   echo -e "${dim}  go install github.com/tomnomnom/waybackurls@latest${reset}"
@@ -151,7 +152,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan cmdi_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Shodan Asset Discovery"
@@ -174,6 +175,7 @@ STEP_LABELS=(
   "Open Redirect / SSRF / IDOR Flagging"
   "XSS Scan (dalfox)"
   "SQL Injection Detection (sqlmap)"
+  "Command Injection Detection (commix)"
   "Nuclei Vulnerability Scan"
   "Subdomain Takeover Check"
   "Sensitive Keyword Grep"
@@ -646,6 +648,41 @@ step_sqli_scan() {
   fi
 }
 
+step_cmdi_scan() {
+  mkdir -p cmdi report
+  if ! check_tool commix; then
+    return 0
+  fi
+  if [[ ! -s params/urls_with_params.txt ]]; then
+    echo -e "${yellow}  no parameterized URLs to test — skipping${reset}"
+    return 0
+  fi
+  # commix has no built-in bulk/file-list mode (unlike sqlmap's -m), so we
+  # loop per URL — capped to keep total runtime reasonable.
+  local max_urls=30
+  local total_urls
+  total_urls=$(wc -l < params/urls_with_params.txt)
+  if [[ "$total_urls" -gt "$max_urls" ]]; then
+    echo -e "${yellow}  testing first $max_urls of $total_urls parameterized URLs (commix has no bulk mode)${reset}"
+  fi
+  local urls_total urls_done=0
+  urls_total=$(( total_urls < max_urls ? total_urls : max_urls ))
+  while read -r url; do
+    [[ -z "$url" ]] && continue
+    urls_done=$((urls_done+1))
+    local safe_name
+    safe_name=$(echo "$url" | sed 's/[^a-zA-Z0-9]/_/g')
+    printf "\r${cyan}⠋${reset} Command injection testing  ${green}%d/%d${reset}   " "$urls_done" "$urls_total"
+    # Detection-only: --level=1 is commix's least invasive setting. No
+    # --os-shell/file-read/exfiltration flags — confirms injectability only.
+    timeout 60 commix --url="$url" --batch --level=1 -v0 > "cmdi/commix_${safe_name}.log" 2>&1
+  done < <(head -n "$max_urls" params/urls_with_params.txt)
+  echo ""
+  if command -v python3 &> /dev/null; then
+    python3 parse_commix.py
+  fi
+}
+
 step_nuclei() {
   mkdir -p nuclei && cd nuclei || return 1
   if check_tool nuclei && [[ -s ../live/httpx_live.txt ]]; then
@@ -870,7 +907,7 @@ if [[ -z "$WORKDIR" ]]; then
   echo -e "${green}Starting fresh run: $WORKDIR${reset}"
 fi
 
-mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,waf,content_discovery,urls,params,nuclei,takeover,js,wordpress,nikto,report,logs}
+mkdir -p "$WORKDIR"/{subdomains,permutation,resolve,live,waf,content_discovery,urls,params,nuclei,takeover,js,wordpress,nikto,cmdi,report,logs}
 cp "$SCRIPT_DIR/scan_js_secrets.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_shodan.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/rate_limiter.py" "$WORKDIR/" 2>/dev/null
@@ -885,6 +922,7 @@ cp "$SCRIPT_DIR/check_misconfig.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_nikto.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_sqlmap.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/fingerprint_waf.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/parse_commix.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
@@ -923,6 +961,7 @@ run_step params          step_params
 run_step param_flagging  step_param_flagging
 run_step xss             step_xss
 run_step sqli_scan       step_sqli_scan
+run_step cmdi_scan       step_cmdi_scan
 run_step nuclei          step_nuclei
 run_step takeover        step_takeover
 run_step keywords        step_keywords

@@ -109,7 +109,7 @@ def build_host_data():
         "cors": [], "misconfig": [], "wordpress": None, "nuclei_critical": [],
         "nuclei_exposures": [], "nuclei_wordpress": [], "js_secrets": [],
         "cicd_k8s": [], "graphql": [], "openapi": [], "cloud_buckets": [],
-        "login_pages": [], "sqli": [],
+        "login_pages": [], "sqli": [], "cmdi": [],
     })
 
     for f in (read_json("report/sensitive_files.json", {}) or {}).get("findings", []):
@@ -190,6 +190,11 @@ def build_host_data():
         h = normalize_host(s.get("url"))
         if h:
             host_data[h]["sqli"].append(s)
+
+    for c in (read_json("report/cmdi_findings.json", {}) or {}).get("findings", []):
+        h = normalize_host(c.get("url"))
+        if h:
+            host_data[h]["cmdi"].append(c)
 
     return host_data
 
@@ -345,6 +350,35 @@ def rule_sqli_plus_login(host, d):
     return None
 
 
+def rule_confirmed_cmdi(host, d):
+    if d["cmdi"]:
+        params = [c.get("parameter") or "?" for c in d["cmdi"]]
+        return {
+            "name": "Confirmed OS command injection (commix, detection-only)",
+            "severity": "critical",
+            "host": host,
+            "explanation": f"commix confirmed {len(d['cmdi'])} injectable parameter(s) on this host: "
+                            f"{', '.join(params)}. No shell was opened and no data was read (detection-only run) — "
+                            "this is one of the most severe vulnerability classes possible (potential full server "
+                            "compromise) and needs immediate manual follow-up.",
+        }
+    return None
+
+
+def rule_cmdi_plus_wordpress(host, d):
+    if d["cmdi"] and d["wordpress"]:
+        return {
+            "name": "Confirmed command injection on a known WordPress host",
+            "severity": "critical",
+            "host": host,
+            "explanation": "This host runs a fingerprinted WordPress install AND has a confirmed OS command "
+                            "injection point. Worth checking whether the injectable parameter belongs to a "
+                            "specific plugin/theme — that would let a fix (or a disclosure) target the exact "
+                            "vulnerable component instead of just the symptom.",
+        }
+    return None
+
+
 NAMED_RULES = [
     rule_wordpress_plus_cve,
     rule_admin_panel_plus_ip_bypass,
@@ -356,6 +390,8 @@ NAMED_RULES = [
     rule_login_plus_ip_bypass,
     rule_confirmed_sqli,
     rule_sqli_plus_login,
+    rule_confirmed_cmdi,
+    rule_cmdi_plus_wordpress,
 ]
 
 
