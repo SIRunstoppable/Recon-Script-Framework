@@ -48,6 +48,7 @@ WEIGHTS = {
     "cicd_k8s_exposed": 3,
     "graphql_introspection": 2,
     "login_page": 1,
+    "juicy_file": 2,
 }
 
 
@@ -109,7 +110,7 @@ def build_host_data():
         "cors": [], "misconfig": [], "wordpress": None, "nuclei_critical": [],
         "nuclei_exposures": [], "nuclei_wordpress": [], "js_secrets": [],
         "cicd_k8s": [], "graphql": [], "openapi": [], "cloud_buckets": [],
-        "login_pages": [], "sqli": [], "cmdi": [],
+        "login_pages": [], "sqli": [], "cmdi": [], "juicy_files": [],
     })
 
     for f in (read_json("report/sensitive_files.json", {}) or {}).get("findings", []):
@@ -195,6 +196,11 @@ def build_host_data():
         h = normalize_host(c.get("url"))
         if h:
             host_data[h]["cmdi"].append(c)
+
+    for j in (read_json("report/juicy_files.json", {}) or {}).get("files", []):
+        h = normalize_host(j.get("url"))
+        if h:
+            host_data[h]["juicy_files"].append(j)
 
     return host_data
 
@@ -379,6 +385,22 @@ def rule_cmdi_plus_wordpress(host, d):
     return None
 
 
+def rule_confirmed_juicy_file(host, d):
+    confirmed = [j for j in d["juicy_files"] if j.get("status") is not None and j.get("status", 999) < 300]
+    if confirmed:
+        names = [j["url"].rsplit("/", 1)[-1] for j in confirmed]
+        high_value = any(n.lower().endswith((".env", ".sql", ".db")) for n in names)
+        return {
+            "name": "Directly accessible backup/config/database file",
+            "severity": "critical" if high_value else "high",
+            "host": host,
+            "explanation": f"{len(confirmed)} sensitive file(s) confirmed directly accessible on this host: "
+                            f"{', '.join(names)}. These commonly contain database credentials, API keys, or full "
+                            "data dumps — this is a confirmed information-disclosure finding, not a lead.",
+        }
+    return None
+
+
 NAMED_RULES = [
     rule_wordpress_plus_cve,
     rule_admin_panel_plus_ip_bypass,
@@ -392,6 +414,7 @@ NAMED_RULES = [
     rule_sqli_plus_login,
     rule_confirmed_cmdi,
     rule_cmdi_plus_wordpress,
+    rule_confirmed_juicy_file,
 ]
 
 
@@ -410,6 +433,7 @@ def cumulative_score(d):
     score += len(d["cicd_k8s"]) * WEIGHTS["cicd_k8s_exposed"]
     score += len(d["graphql"]) * WEIGHTS["graphql_introspection"]
     score += len(d["login_pages"]) * WEIGHTS["login_page"]
+    score += len(d["juicy_files"]) * WEIGHTS["juicy_file"]
     return score
 
 
