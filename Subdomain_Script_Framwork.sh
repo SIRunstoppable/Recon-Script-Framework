@@ -152,7 +152,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan cmdi_scan nuclei takeover keywords js cloud_exposure source_maps correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan cmdi_scan nuclei takeover keywords js cloud_exposure source_maps juicy_files correlate ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Shodan Asset Discovery"
@@ -182,6 +182,7 @@ STEP_LABELS=(
   "JavaScript File Harvest"
   "Cloud Exposure (S3/Azure/GitHub/CI-CD)"
   "Exposed Source Map Recovery"
+  "Juicy File Discovery (sql/pak/zip/env/db)"
   "Correlation Engine"
   "AI Attack Surface Report"
 )
@@ -765,6 +766,15 @@ step_source_maps() {
   python3 extract_source_maps.py
 }
 
+step_juicy_files() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping juicy file discovery${reset}"
+    return 0
+  fi
+  python3 find_juicy_files.py
+}
+
 step_correlate() {
   mkdir -p report
   if ! command -v python3 &> /dev/null; then
@@ -923,6 +933,7 @@ cp "$SCRIPT_DIR/parse_nikto.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_sqlmap.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/fingerprint_waf.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_commix.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/find_juicy_files.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
@@ -968,6 +979,7 @@ run_step keywords        step_keywords
 run_step js              step_js
 run_step cloud_exposure  step_cloud_exposure
 run_step source_maps     step_source_maps
+run_step juicy_files     step_juicy_files
 run_step correlate       step_correlate
 run_step ai_report       step_ai_report
 
