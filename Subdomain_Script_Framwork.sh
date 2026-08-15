@@ -152,7 +152,7 @@ export RECON_MAX_WORKERS="$THREADS"
 
 # ---------- Step tracking ----------
 # key = stable ID stored in the checkpoint file. label = what's shown to the user.
-STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan cmdi_scan nuclei takeover keywords js cloud_exposure source_maps juicy_files correlate ai_report)
+STEP_KEYS=(subdomains shodan permutation resolve ip_export probe waf_detect content_discovery sensitive_files login_pages wordpress api_extraction cors_headers misconfig nikto ip_bypass urls params param_flagging xss sqli_scan cmdi_scan nuclei takeover keywords js cloud_exposure source_maps juicy_files correlate flags ai_report)
 STEP_LABELS=(
   "Subdomain Enumeration"
   "Shodan Asset Discovery"
@@ -184,6 +184,7 @@ STEP_LABELS=(
   "Exposed Source Map Recovery"
   "Juicy File Discovery (sql/pak/zip/env/db)"
   "Correlation Engine"
+  "Flags Collection"
   "AI Attack Surface Report"
 )
 TOTAL_STEPS=${#STEP_KEYS[@]}
@@ -784,6 +785,15 @@ step_correlate() {
   python3 correlate_findings.py
 }
 
+step_flags() {
+  mkdir -p report
+  if ! command -v python3 &> /dev/null; then
+    echo -e "${red}  ⚠ python3 not found — skipping flags collection${reset}"
+    return 0
+  fi
+  python3 collect_flags.py
+}
+
 step_ai_report() {
   if [[ -z "$GEMINI_API_KEY" ]]; then
     echo -e "${red}  ⚠ GEMINI_API_KEY not set - skipping AI report.${reset}"
@@ -934,6 +944,7 @@ cp "$SCRIPT_DIR/parse_sqlmap.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/fingerprint_waf.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/parse_commix.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/find_juicy_files.py" "$WORKDIR/" 2>/dev/null
+cp "$SCRIPT_DIR/collect_flags.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/check_ip_bypass.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/correlate_findings.py" "$WORKDIR/" 2>/dev/null
 cp "$SCRIPT_DIR/export_ip_list.py" "$WORKDIR/" 2>/dev/null
@@ -981,8 +992,22 @@ run_step cloud_exposure  step_cloud_exposure
 run_step source_maps     step_source_maps
 run_step juicy_files     step_juicy_files
 run_step correlate       step_correlate
+run_step flags           step_flags
 run_step ai_report       step_ai_report
 
 echo ""
 echo -e "${green}${bold}✔ Recon complete.${reset} Results in: $(pwd)"
 [[ -f report/attack_surface_report.html ]] && echo -e "${green}  Open report/attack_surface_report.html for the AI summary.${reset}"
+if [[ -f report/flags.json ]] && command -v python3 &> /dev/null; then
+  flag_summary=$(python3 -c "
+import json
+try:
+    d = json.load(open('report/flags.json'))
+    print(f\"{d.get('critical_count',0)} critical, {d.get('high_count',0)} high\")
+except Exception:
+    print('')
+" 2>/dev/null)
+  if [[ -n "$flag_summary" ]]; then
+    echo -e "${red}${bold}  ⚑ report/flags.txt: $flag_summary${reset}"
+  fi
+fi
